@@ -1,0 +1,136 @@
+﻿
+
+
+
+
+
+
+
+
+
+
+EXÉRCITO BRASILEIRO
+
+CAPACITAÇÃO DE PATENTE
+
+
+
+
+
+
+
+
+
+
+
+
+
+______________________________________________________________
+
+
+A partir de Terceiro-Sargento, os militares com a gamepass VIP possuem -2 dias de CDP no Exército Brasileiro.
+
+A partir de Aspirante-a-Oficial,  os militares com a gamepass VIP possuem -3 dias de CDP no Exército Brasileiro.
+
+______________________________________________________________
+
+Praças:
+
+[REC] Recruta: não possui CDP.
+[SLD] Soldado: 1 dia.
+[CB] Cabo: 2 dias.
+
+______________________________________________________________
+
+
+Graduados:
+
+[T-SGT] Terceiro-Sargento: 4 dias + 8 relatórios de recrutamento. VIP: 2 dias + 4 relatórios de recrutamento.
+[S-SGT] Segundo-Sargento: 5 dias + 10 relatórios de recrutamento. VIP: 3 dias + 6 relatórios de recrutamento.
+[P-SGT] Primeiro-Sargento: 6 dias + 12 relatórios de recrutamento. VIP: 4 dias + 8 relatórios de recrutamento.
+[SB-TEN] Subtenente: 7 dias + 14 relatórios de recrutamento e deve ser aprovado no exame de admissão para a Academia Militar das Agulhas Negras. VIP: 5 dias + 10 relatórios de recrutamento e deve ser aprovado no exame de admissão para a Academia Militar das Agulhas Negras.
+[CDT] Cadete: 5 recrutamentos, realização de patrulhamentos e participação de eventuais da AMAN. VIP: 5 recrutamentos, realização de patrulhamentos e participação de eventuais da AMAN.
+
+______________________________________________________________
+
+
+Oficiais:
+
+[AAO] Aspirante a Oficial: 7 dias + 13 relatórios promocionais. VIP: 4 dias + 9 relatórios promocionais. 
+[S-TN] Segundo-Tenente: 8 dias + 14 relatórios promocionais. VIP: 5 dias + 10 relatórios promocionais.
+[P-TN] Primeiro-Tenente: 9 dias + 15 relatórios promocionais. VIP: 6 dias + 11 relatórios promocionais.
+[CAP] Capitão: 10 dias + 16 relatórios promocionais. VIP: 7 dias + 12 relatórios promocionais.
+[MAJ] Major: 11 dias + 17 relatórios promocionais. VIP: 8 dias + 13 relatórios promocionais
+[TN-COL] Tenente-Coronel: 12 dias + 18 relatórios promocionais. VIP: 9 dias + 14 relatórios promocionais.
+[COL] Coronel: destaque em suas atividades militares.
+
+______________________________________________________________
+
+
+Oficiais Generais:
+
+[GENB] General de Brigada: promovido apenas por mérito na realização de serviços. 8 vagas no máximo para essa patente.
+[GEND] General de Divisão: promovido apenas por mérito na realização de serviços. 5 vagas no máximo para essa patente.
+[GENE] General de Exército: promovido apenas por mérito na realização de serviços. 5 vagas no máximo para essa patente.
+
+______________________________________________________________
+
+
+
+
+
+
+╭────────── ✯ ──────────╮
+CRIADOR [EB]
+tevez1006
+
+ALTO ESCALÃO DO EXÉRCITO 
+DkMadarinha
+
+AUXILIARES
+toskagi, rafaesisimo, dxrkeus KAIObocade09 e Gavimaster_YT
+╰────────── ✯ ──────────╯
+
+
+
+
+
+
+ALTO ESCALÃO
+[COM] Comandante
+[SUB-COM] Subcomandante
+
+OFICIAIS GENERAIS
+[MAR] Marechal
+[GENE] General de Exército
+[GEND] General de Divisão
+[GENB] General de Brigada
+
+OFICIAIS SUPERIORES
+[COL] Coronel
+[TN-COL] Tenente-Coronel
+[MAJ] Major
+
+OFICIAIS INTERMEDIÁRIOS
+[CAP] Capitão
+
+OFICIAIS SUBALTERNOS
+[P-TN] Primeiro-Tenente
+[S-TN] Segundo-Tenente
+[AAO] Aspirante a Oficial
+
+PRAÇAS ESPECIAIS
+[CDT] Cadete
+
+GRADUADOS
+[SB-TEN] Subtenente
+[P-SGT] Primeiro-Sargento
+[S-SGT] Segundo-Sargento
+[T-SGT] Terceiro-Sargento
+
+PRAÇAS
+[CB] Cabo
+[SLD] Soldado
+[REC] Recruta
+
+EB || Exército Brasileiro•21/08/2024, 22:11
