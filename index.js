@@ -1,67 +1,66 @@
-const express = require('express');
-const axios = require('axios');
-const cors = require('cors');
-const fs = require('fs');
-const path = require('path');
+import express from 'express';
+import fs from 'fs';
+import path from 'path';
+import { Configuration, OpenAIApi } from 'openai';
+import dotenv from 'dotenv';
+dotenv.config();
 
 const app = express();
-app.use(cors());
+const PORT = process.env.PORT || 10000;
+
 app.use(express.json());
 
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const openai = new OpenAIApi(new Configuration({
+  apiKey: process.env.OPENAI_API_KEY
+}));
 
-// Lê todos os arquivos .txt da raiz do projeto
-function carregarTextos() {
-    const arquivos = fs.readdirSync(__dirname)
-        .filter(nome => nome.endsWith('.txt'));
+// Util para ler todos os arquivos .txt da pasta
+function lerTextosDaPasta() {
+  const dir = path.join(process.cwd(), './');
+  const arquivos = fs.readdirSync(dir).filter(arquivo => arquivo.endsWith('.txt'));
+  let conteudoTotal = '';
 
-    let conteudoTotal = '';
-    for (const nome of arquivos) {
-        const caminho = path.join(__dirname, nome);
-        const texto = fs.readFileSync(caminho, 'utf-8');
-        conteudoTotal += `\n\n=== ${nome} ===\n${texto}`;
-    }
+  for (const arquivo of arquivos) {
+    const texto = fs.readFileSync(path.join(dir, arquivo), 'utf-8');
+    conteudoTotal += `\nArquivo: ${arquivo}\n${texto}\n`;
+  }
 
-    return conteudoTotal;
+  return conteudoTotal;
 }
 
 app.post('/openai', async (req, res) => {
-    const { mensagem, jogador } = req.body;
+  // Valida mensagem corretamente
+  if (!req.body || typeof req.body.mensagem !== 'string' || req.body.mensagem.trim() === '') {
+    return res.status(400).json({ erro: 'Mensagem ausente ou inválida.' });
+  }
 
-    if (!mensagem) return res.status(400).json({ erro: 'Mensagem ausente.' });
+  const mensagem = req.body.mensagem;
+  const jogador = req.body.jogador || 'Desconhecido';
 
-    const textosBase = carregarTextos();
+  try {
+    const baseTextos = lerTextosDaPasta();
+    const prompt = `Você é a IA do Exército Brasileiro do Tevez. Utilize as informações abaixo para responder à pergunta:
+${baseTextos}
 
-    try {
-        const resposta = await axios.post(
-            'https://api.openai.com/v1/chat/completions',
-            {
-                model: 'gpt-5-nano ',
-                messages: [
-                    { role: 'system', content: 'Você é um assistente de um exército no Roblox. Responda com base nos documentos fornecidos.' },
-                    { role: 'system', content: `Documentos:\n${textosBase}` },
-                    { role: 'user', content: mensagem }
-                ],
-                temperature: 0.6
-            },
-            {
-                headers: {
-                    Authorization: `Bearer ${OPENAI_API_KEY}`,
-                    'Content-Type': 'application/json'
-                }
-            }
-        );
+Jogador: ${jogador}
+Pergunta: ${mensagem}
+Resposta:`;
 
-        const respostaTexto = resposta.data.choices[0].message.content;
-        res.json({ resposta: respostaTexto });
+    const resposta = await openai.createChatCompletion({
+      model: 'gpt-5-nano',
+      messages: [
+        { role: 'system', content: 'Você é um assistente militar educado e direto.' },
+        { role: 'user', content: prompt }
+      ]
+    });
 
-    } catch (err) {
-        console.error(err.response?.data || err.message);
-        res.status(500).json({ erro: 'Erro ao consultar a OpenAI.' });
-    }
+    const respostaFinal = resposta.data.choices[0]?.message?.content?.trim() || 'Não foi possível gerar uma resposta.';
+    return res.json({ resposta: respostaFinal });
+
+  } catch (erro) {
+    console.error('[ERRO IA]:', erro);
+    return res.status(500).json({ erro: 'Erro interno ao processar a mensagem.' });
+  }
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-    console.log(`✅ Servidor rodando na porta ${PORT}`);
-});
+app.listen(PORT, () => console.log(`\u2705 Servidor rodando na porta ${PORT}`));
