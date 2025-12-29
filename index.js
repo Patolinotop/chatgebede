@@ -9,8 +9,16 @@ app.use(cors());
 app.options("*", cors()); // preflight
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+if (!OPENAI_API_KEY) {
+  console.warn("⚠️ OPENAI_API_KEY não definida nas variáveis de ambiente do Render.");
+}
 
-// Lê TODOS os .txt da raiz do projeto (onde ficam index.js e package.json)
+// Mapeamento de versões (igual ao seu Python)
+const MODEL_MAP = {
+  "1": "gpt-4.1-nano",
+  "1pro": "gpt-5-nano"
+};
+
 function carregarTextosDaRaiz() {
   const dir = process.cwd();
   const arquivos = fs.readdirSync(dir).filter((n) => n.toLowerCase().endsWith(".txt"));
@@ -24,7 +32,7 @@ function carregarTextosDaRaiz() {
   return conteudo.trim();
 }
 
-// Middleware: lê o BODY manualmente (não depende de Content-Type)
+// Middleware: lê body manualmente (funciona mesmo se content-type vier zoado/vazio)
 app.use((req, res, next) => {
   if (!["POST", "PUT", "PATCH", "DELETE"].includes(req.method)) return next();
 
@@ -33,8 +41,6 @@ app.use((req, res, next) => {
 
   req.on("data", (chunk) => {
     data += chunk;
-
-    // limite simples (2MB)
     if (data.length > 2 * 1024 * 1024) {
       res.status(413).json({ erro: "Body grande demais (limite 2MB)." });
       req.destroy();
@@ -53,11 +59,11 @@ app.use((req, res, next) => {
         req.parsedBody = JSON.parse(data);
         return next();
       } catch {
-        // segue pro próximo parser
+        // segue
       }
     }
 
-    // tenta x-www-form-urlencoded
+    // tenta urlencoded
     try {
       const params = new URLSearchParams(data);
       const obj = {};
@@ -71,7 +77,7 @@ app.use((req, res, next) => {
   });
 });
 
-// Debug: veja exatamente o que chega
+// debug opcional
 app.post("/echo", (req, res) => {
   res.json({
     ok: true,
@@ -85,40 +91,50 @@ app.get("/health", (req, res) => res.json({ ok: true }));
 
 app.post("/openai", async (req, res) => {
   const body = req.parsedBody || {};
-  const mensagem = (typeof body.mensagem === "string" ? body.mensagem : "").trim();
+
+  // aceita "mensagem" OU "message"
+  const mensagem = (
+    typeof body.mensagem === "string" ? body.mensagem :
+    typeof body.message === "string" ? body.message :
+    ""
+  ).trim();
+
   const jogador = (typeof body.jogador === "string" ? body.jogador : "Desconhecido");
+  const version = (typeof body.version === "string" ? body.version : "1pro"); // default gpt-5-nano
+  const selectedModel = MODEL_MAP[version] || "gpt-4.1-nano";
 
   if (!mensagem) {
     return res.status(400).json({
       erro: "Mensagem ausente ou inválida.",
-      contentType: req.headers["content-type"] || null,
-      rawBodyPreview: (req.rawBody || "").slice(0, 300),
-      parsedBody: body
+      dica: "Envie JSON com { mensagem: \"...\" } (ou { message: \"...\" }).",
+      parsedBody: body,
+      rawBodyPreview: (req.rawBody || "").slice(0, 300)
     });
   }
 
-  try {
-    const textosBase = carregarTextosDaRaiz();
+  const textosBase = carregarTextosDaRaiz();
 
+  try {
+    // Chamada mínima (sem temperature) — evita o 400 que você viu
     const r = await axios.post(
       "https://api.openai.com/v1/chat/completions",
       {
-        model: "gpt-5-nano",
+        model: selectedModel,
         messages: [
           {
             role: "system",
             content:
-              "Responda usando os documentos fornecidos. Se não encontrar nos documentos, diga que não encontrou."
+              "Você é o ChatiGebede. Responda em Markdown. Se for código, use blocos ```linguagem. " +
+              "Seja prestativo e profissional. Use os documentos fornecidos como base."
           },
           {
             role: "system",
             content: textosBase
-              ? `Documentos base:\n${textosBase}`
-              : "Documentos base: (nenhum .txt encontrado na raiz do projeto)"
+              ? `Documentos:\n${textosBase}`
+              : "Documentos: (nenhum .txt encontrado na raiz do projeto)"
           },
-          { role: "user", content: `Jogador: ${jogador}\nPergunta: ${mensagem}` }
-        ],
-        temperature: 0.4
+          { role: "user", content: mensagem }
+        ]
       },
       {
         headers: {
@@ -129,13 +145,12 @@ app.post("/openai", async (req, res) => {
       }
     );
 
-    const respostaTexto =
-      r.data?.choices?.[0]?.message?.content?.trim() || "Não consegui gerar resposta.";
-
-    return res.json({ resposta: respostaTexto });
+    const reply = r.data?.choices?.[0]?.message?.content || "";
+    return res.json({ resposta: reply, model_used: selectedModel });
   } catch (e) {
     const status = e.response?.status;
     const data = e.response?.data;
+
     console.error("❌ Erro OpenAI:", status, data || e.message);
 
     return res.status(500).json({
