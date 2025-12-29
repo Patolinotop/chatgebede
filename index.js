@@ -7,29 +7,45 @@ const path = require("path");
 const app = express();
 app.use(cors());
 
-// captura RAW body (antes do parse)
-app.use(express.json({
-  limit: "2mb",
-  verify: (req, res, buf) => {
-    req.rawBody = buf?.toString("utf8") || "";
-  }
-}));
+// Captura o body bruto de QUALQUER content-type
+app.use(express.raw({ type: "*/*", limit: "2mb" }));
 
-// aceita form também (caso cliente mande urlencoded)
-app.use(express.urlencoded({
-  extended: false,
-  limit: "2mb"
-}));
-
-// se JSON vier quebrado, responde com erro claro
-app.use((err, req, res, next) => {
-  if (err instanceof SyntaxError && err.status === 400 && "body" in err) {
-    return res.status(400).json({
-      erro: "JSON inválido no corpo da requisição.",
-      contentType: req.headers["content-type"] || null,
-      rawBodyPreview: (req.rawBody || "").slice(0, 300)
-    });
+function parseBody(req) {
+  const buf = req.body;
+  if (!Buffer.isBuffer(buf) || buf.length === 0) {
+    req.rawBody = "";
+    req.parsedBody = {};
+    return;
   }
+
+  const text = buf.toString("utf8");
+  req.rawBody = text;
+
+  // tenta JSON mesmo sem content-type
+  const trimmed = text.trim();
+  if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+    try {
+      req.parsedBody = JSON.parse(text);
+      return;
+    } catch {
+      req.parsedBody = {};
+      return;
+    }
+  }
+
+  // tenta x-www-form-urlencoded
+  try {
+    const params = new URLSearchParams(text);
+    const obj = {};
+    for (const [k, v] of params.entries()) obj[k] = v;
+    req.parsedBody = obj;
+  } catch {
+    req.parsedBody = {};
+  }
+}
+
+app.use((req, res, next) => {
+  parseBody(req);
   next();
 });
 
@@ -37,7 +53,7 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
 function carregarTextosDaRaiz() {
   const dir = process.cwd();
-  const arquivos = fs.readdirSync(dir).filter(n => n.toLowerCase().endsWith(".txt"));
+  const arquivos = fs.readdirSync(dir).filter((n) => n.toLowerCase().endsWith(".txt"));
 
   let conteudo = "";
   for (const nome of arquivos) {
@@ -48,37 +64,31 @@ function carregarTextosDaRaiz() {
   return conteudo.trim();
 }
 
-// DEBUG: veja o que chega do cliente
+// Debug
 app.post("/echo", (req, res) => {
   res.json({
     ok: true,
     method: req.method,
     url: req.originalUrl,
     headers: req.headers,
-    bodyType: typeof req.body,
-    body: req.body,
-    rawBodyPreview: (req.rawBody || "").slice(0, 500)
+    rawBodyPreview: (req.rawBody || "").slice(0, 500),
+    parsedBody: req.parsedBody || {}
   });
 });
 
-app.get("/health", (req, res) => {
-  res.json({ ok: true });
-});
+app.get("/health", (req, res) => res.json({ ok: true }));
 
 app.post("/openai", async (req, res) => {
-  const body = req.body || {};
-
-  // mensagem pode vir de JSON ou form
+  const body = req.parsedBody || {};
   const mensagem = (typeof body.mensagem === "string" ? body.mensagem : "").trim();
   const jogador = (typeof body.jogador === "string" ? body.jogador : "Desconhecido");
 
   if (!mensagem) {
     return res.status(400).json({
       erro: "Mensagem ausente ou inválida.",
-      dica: "Teste POST em /echo para ver o body real que está chegando.",
       contentType: req.headers["content-type"] || null,
-      bodyRecebido: body,
-      rawBodyPreview: (req.rawBody || "").slice(0, 300)
+      rawBodyPreview: (req.rawBody || "").slice(0, 300),
+      parsedBody: body
     });
   }
 
@@ -114,14 +124,11 @@ app.post("/openai", async (req, res) => {
       }
     );
 
-    const respostaTexto =
-      r.data?.choices?.[0]?.message?.content?.trim() || "Não consegui gerar resposta.";
-
+    const respostaTexto = r.data?.choices?.[0]?.message?.content?.trim() || "Não consegui gerar resposta.";
     return res.json({ resposta: respostaTexto });
   } catch (e) {
     const status = e.response?.status;
     const data = e.response?.data;
-
     console.error("❌ Erro OpenAI:", status, data || e.message);
 
     return res.status(500).json({
