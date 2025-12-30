@@ -7,7 +7,7 @@ client = OpenAI(
     api_key=os.getenv("OPENAI_API_KEY")
 )
 
-MODEL_NAME = "gpt-4o"
+MODEL_NAME = "gpt-5-nano"
 
 app = FastAPI()
 
@@ -38,23 +38,29 @@ async def gerar_texto(tema: str = "tema"):
         repo_state = scan_repository()
 
         prompt = (
-            "Gere uma frase única, extremamente curta (máx. 120 caracteres), objetiva e limpa.\n"
-            "Sem explicações, sem parágrafos.\n"
+            f"Gere uma única frase curta e direta (máx. 120 caracteres) sobre o tema abaixo.\n"
             f"Tema: {tema}\n"
-            f"Arquivos encontrados no projeto: {repo_state}"
+            f"Arquivos no repositório: {repo_state}\n"
+            f"Evite explicações. Apenas uma frase objetiva."
         )
 
-        r = client.responses.create(
+        response = client.chat.completions.create(
             model=MODEL_NAME,
-            input=[
-                {"role": "system", "content": "Responda apenas com uma frase curta e direta."},
-                {"role": "user", "content": prompt}
+            messages=[
+                {
+                    "role": "system",
+                    "content": "Responda sempre com UMA frase curta e direta, sem explicação extra."
+                },
+                {
+                    "role": "user",
+                    "content": prompt
+                }
             ],
-            max_output_tokens=100
+            max_tokens=50  # limite proposital pra evitar spam
         )
 
-        output = r.output.strip()
-        return output[:140] if output else "Erro: resposta vazia."
+        reply = response.choices[0].message.content.strip()
+        return reply[:140] if reply else "Erro: resposta vazia."
 
     except Exception as e:
         return f"Erro: {str(e)}"
