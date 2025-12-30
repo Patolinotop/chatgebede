@@ -10,7 +10,7 @@ client = OpenAI(
     api_key=os.getenv("OPENAI_API_KEY")
 )
 
-MODEL_NAME = "gpt-5-nano"  # conforme solicitado
+MODEL_NAME = "gpt-5-nano"  # ✅ seu modelo custom
 
 # ===============================
 # FASTAPI
@@ -39,8 +39,7 @@ def scan_repository(base_path="."):
                 files_info.append(f"{file} ({size} bytes)")
             except:
                 pass
-    return ", ".join(files_info)[:1000]  # limite de segurança
-
+    return ", ".join(files_info)[:1000]
 
 # ===============================
 # ROTA PRINCIPAL
@@ -51,24 +50,20 @@ async def gerar_texto(tema: str = "tema"):
         repo_state = scan_repository()
 
         prompt = (
-            "Gere UMA frase extremamente curta (máx. 120 caracteres), clara e direta.\n"
-            "NÃO use parágrafos, NÃO use explicações.\n"
+            "Gere UMA única frase muito curta (máx. 120 caracteres) e direta sobre o tema abaixo.\n"
+            "Evite parágrafos, não explique.\n"
             f"Tema: {tema}\n"
-            f"Estado do repositório (verificação interna): {repo_state}"
+            f"Arquivos no repositório: {repo_state}"
         )
 
         response = client.chat.completions.create(
             model=MODEL_NAME,
-            messages=[
-                {"role": "user", "content": prompt}
-            ],
-            max_tokens=25,          # MUITO curto
+            messages=[{"role": "user", "content": prompt}],
+            max_completion_tokens=30,  # ✅ substitui max_tokens
             temperature=0.5
         )
 
         texto = response.choices[0].message.content.strip()
-
-        # Garantia extra de tamanho (anti-Roblox)
         return texto[:140]
 
     except Exception as e:
