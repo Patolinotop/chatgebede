@@ -10,7 +10,7 @@ client = OpenAI(
     api_key=os.getenv("OPENAI_API_KEY")
 )
 
-MODEL_NAME = "gpt-5-nano"  # ✅ seu modelo custom
+MODEL_NAME = "gpt-5-nano"
 
 # ===============================
 # FASTAPI
@@ -59,8 +59,7 @@ async def gerar_texto(tema: str = "tema"):
         response = client.chat.completions.create(
             model=MODEL_NAME,
             messages=[{"role": "user", "content": prompt}],
-            max_completion_tokens=30,  # ✅ substitui max_tokens
-            temperature=0.5
+            max_completion_tokens=30  # ✅ removido temperature
         )
 
         texto = response.choices[0].message.content.strip()
