@@ -50,20 +50,22 @@ async def gerar_texto(tema: str = "tema"):
         repo_state = scan_repository()
 
         prompt = (
-            "Gere UMA única frase muito curta (máx. 120 caracteres) e direta sobre o tema abaixo.\n"
-            "Evite parágrafos, não explique.\n"
-            f"Tema: {tema}\n"
-            f"Arquivos no repositório: {repo_state}"
+            "Responda com uma frase única, curta e direta (máx. 120 caracteres) sobre o tema:\n"
+            f"{tema}\n"
+            "Não use explicações longas, apenas a frase limpa e direta."
         )
 
-        response = client.chat.completions.create(
+        r = client.responses.create(
             model=MODEL_NAME,
-            messages=[{"role": "user", "content": prompt}],
-            max_completion_tokens=30  # ✅ removido temperature
+            input=[
+                {"role": "system", "content": "Responda apenas texto limpo, curto, direto."},
+                {"role": "user", "content": prompt}
+            ],
+            max_output_tokens=120
         )
 
-        texto = response.choices[0].message.content.strip()
-        return texto[:140]
+        output = r.output.strip()
+        return output[:140] if output else "Erro: resposta vazia."
 
     except Exception as e:
         return f"Erro: {str(e)}"
