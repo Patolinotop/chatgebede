@@ -1,14 +1,14 @@
 # ================================
-# MENU EB – Backend Chatbot (Railway READY)
-# Status: COMPLETO, CORRIGIDO e FUNCIONAL
-# Autor: ChatGPT Cheats
+# MENU EB – Backend Chatbot (REPLIT READY)
+# Modelo: gpt-4o-mini (boa qualidade + custo baixo)
+# Status: COMPLETO, ATUALIZADO e FUNCIONAL
 # ================================
 
 # ----------------
 # requirements.txt
 # ----------------
 # flask
-# openai
+# openai>=1.0.0
 # python-dotenv
 # requests
 
@@ -16,7 +16,7 @@ from flask import Flask, request, jsonify
 import os
 import requests
 from dotenv import load_dotenv
-import openai
+from openai import OpenAI
 
 # ================================
 # ENV
@@ -32,7 +32,7 @@ if not OPENAI_API_KEY:
 if not GITHUB_REPO:
     raise RuntimeError("GITHUB_REPO não configurado")
 
-openai.api_key = OPENAI_API_KEY
+client = OpenAI(api_key=OPENAI_API_KEY)
 
 # ================================
 # APP
@@ -40,7 +40,7 @@ openai.api_key = OPENAI_API_KEY
 app = Flask(__name__)
 
 # ================================
-# GitHub API (sem git)
+# GitHub API (ler .txt como contexto)
 # ================================
 
 def listar_txt(path=""):
@@ -70,27 +70,37 @@ def ler_contexto():
     return "\n".join(textos)
 
 # ================================
-# OpenAI
+# OpenAI – geração (gpt-4o-mini)
 # ================================
 
 def gerar_resposta(pergunta: str, contexto: str) -> str:
-    prompt = (
-        "Use o contexto abaixo SOMENTE se for útil. "
-        "Gere uma resposta curta, clara e gramatical. "
-        "Máximo 100 caracteres.\n\n"
-        f"CONTEXTO:\n{contexto}\n\n"
-        f"PERGUNTA: {pergunta}\nRESPOSTA:" 
+    # Prompt curto e seguro para Roblox (<=100 chars)
+    system_msg = (
+        "Você é um assistente que escreve respostas curtas, claras e gramaticais. "
+        "Use o contexto apenas se ajudar. Limite a resposta a no máximo 100 caracteres."
     )
 
+    user_msg = f"CONTEXTO:\n{contexto}\n\nPERGUNTA: {pergunta}"
+
     try:
-        resp = openai.ChatCompletion.create(
-            model="gpt-4o",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=60,
+        resp = client.responses.create(
+            model="gpt-4o-mini",
+            input=[
+                {"role": "system", "content": system_msg},
+                {"role": "user", "content": user_msg}
+            ],
+            max_output_tokens=80,
             temperature=0.6,
         )
-        return resp.choices[0].message.content.strip()[:100]
+
+        # Extrai texto do response (compatível com SDK novo)
+        text = resp.output_text
+        if not text:
+            return "Sem resposta"
+        return text.strip()[:100]
     except Exception as e:
+        # Log simples para debug no Replit
+        print("[ERRO OpenAI]", e)
         return "Erro ao gerar resposta"
 
 # ================================
@@ -111,15 +121,15 @@ def chatbot():
     return jsonify({"reply": resposta})
 
 # ================================
-# START (Railway compatible)
+# START (Replit / local)
 # ================================
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
+    port = int(os.environ.get("PORT", 3000))
     app.run(host="0.0.0.0", port=port)
 
 # ================================
-# .env EXEMPLO
+# .env (exemplo)
 # ================================
 # OPENAI_API_KEY=sk-xxxxxxxx
 # GITHUB_REPO=Patolinotop/chatgebede
