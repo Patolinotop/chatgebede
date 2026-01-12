@@ -2,3 +2,5 @@ flask
 openai
 GitPython
 python-dotenv
+uvicorn
+fastapi
