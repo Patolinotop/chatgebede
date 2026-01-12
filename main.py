@@ -1,7 +1,8 @@
 # ================================
 # MENU EB – Backend Chatbot (REPLIT READY)
-# Modelo: gpt-4o-mini (boa qualidade + custo baixo)
-# Status: COMPLETO, ATUALIZADO e FUNCIONAL
+# Modelo: gpt-4o-mini
+# Objetivo: analisar TODOS os .txt do repositório e gerar texto natural
+# Status: FINAL, AJUSTADO PARA USO POR TEMA
 # ================================
 
 # ----------------
@@ -40,7 +41,7 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 app = Flask(__name__)
 
 # ================================
-# GitHub API (ler .txt como contexto)
+# GitHub API – ler TODOS os .txt
 # ================================
 
 def listar_txt(path=""):
@@ -70,36 +71,41 @@ def ler_contexto():
     return "\n".join(textos)
 
 # ================================
-# OpenAI – geração (gpt-4o-mini)
+# OpenAI – geração por TEMA
 # ================================
 
-def gerar_resposta(pergunta: str, contexto: str) -> str:
-    # Prompt curto e seguro para Roblox (<=100 chars)
+def gerar_resposta(tema: str, contexto: str) -> str:
     system_msg = (
-        "Você é um assistente que escreve respostas curtas, claras e gramaticais. "
-        "Use o contexto apenas se ajudar. Limite a resposta a no máximo 100 caracteres."
+        "Você escreve como um humano. "
+        "NUNCA cite arquivos, fontes ou contexto. "
+        "NÃO explique o processo. "
+        "Use o contexto apenas como base de conhecimento silenciosa. "
+        "Produza um texto curto, natural e fluido, como se alguém tivesse digitado. "
+        "Máximo absoluto: 100 caracteres."
     )
 
-    user_msg = f"CONTEXTO:\n{contexto}\n\nPERGUNTA: {pergunta}"
+    user_msg = (
+        f"Tema: {tema}\n"
+        "Escreva um texto curto e natural sobre o tema, usando o conhecimento implícito."
+    )
 
     try:
         resp = client.responses.create(
             model="gpt-4o-mini",
             input=[
                 {"role": "system", "content": system_msg},
-                {"role": "user", "content": user_msg}
+                {"role": "user", "content": user_msg},
+                {"role": "user", "content": f"CONHECIMENTO:\n{contexto}"}
             ],
-            max_output_tokens=80,
-            temperature=0.6,
+            max_output_tokens=90,
+            temperature=0.7,
         )
 
-        # Extrai texto do response (compatível com SDK novo)
         text = resp.output_text
         if not text:
             return "Sem resposta"
         return text.strip()[:100]
     except Exception as e:
-        # Log simples para debug no Replit
         print("[ERRO OpenAI]", e)
         return "Erro ao gerar resposta"
 
@@ -110,18 +116,18 @@ def gerar_resposta(pergunta: str, contexto: str) -> str:
 @app.route("/api/chatbot", methods=["POST"])
 def chatbot():
     data = request.get_json(silent=True) or {}
-    pergunta = data.get("input", "").strip()
+    tema = data.get("input", "").strip()
 
-    if not pergunta:
+    if not tema:
         return jsonify({"reply": "Entrada vazia"}), 400
 
     contexto = ler_contexto()
-    resposta = gerar_resposta(pergunta, contexto)
+    resposta = gerar_resposta(tema, contexto)
 
     return jsonify({"reply": resposta})
 
 # ================================
-# START (Replit / local)
+# START (Replit)
 # ================================
 
 if __name__ == "__main__":
