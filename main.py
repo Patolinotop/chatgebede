@@ -1,65 +1,82 @@
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from openai import OpenAI
+# 📦 Requisitos (salve em requirements.txt):
+# flask
+# openai
+# GitPython
+# python-dotenv
+
+from flask import Flask, request, jsonify
+from git import Repo
 import os
+import openai
+from dotenv import load_dotenv
 
-client = OpenAI(
-    api_key=os.getenv("OPENAI_API_KEY")
-)
+# 🔒 Carregar variáveis de ambiente
+load_dotenv()
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+REPO_URL = os.getenv("REPO_URL")  # URL do repositório GitHub (ex: https://github.com/usuario/repositorio.git)
+LOCAL_REPO_PATH = "repo"
 
-MODEL_NAME = "gpt-5-nano"
+# 🧠 Configurar OpenAI
+openai.api_key = OPENAI_API_KEY
 
-app = FastAPI()
+# 🔁 Clonar ou atualizar o repositório
+if not os.path.exists(LOCAL_REPO_PATH):
+    Repo.clone_from(REPO_URL, LOCAL_REPO_PATH)
+else:
+    repo = Repo(LOCAL_REPO_PATH)
+    origin = repo.remotes.origin
+    origin.pull()
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# 🚀 Iniciar app Flask
+app = Flask(__name__)
 
-def scan_repository(base_path="."):
-    files_info = []
-    for root, _, files in os.walk(base_path):
+# 🧾 Função para ler todos os .txt
+def ler_todos_txt():
+    textos = []
+    for root, _, files in os.walk(LOCAL_REPO_PATH):
         for file in files:
-            if file.startswith("."):
-                continue
-            path = os.path.join(root, file)
-            try:
-                size = os.path.getsize(path)
-                files_info.append(f"{file} ({size} bytes)")
-            except:
-                pass
-    return ", ".join(files_info)[:1000]
+            if file.endswith(".txt"):
+                caminho = os.path.join(root, file)
+                with open(caminho, "r", encoding="utf-8") as f:
+                    textos.append(f.read())
+    return "\n".join(textos)
 
-@app.get("/api/chatgpt")
-async def gerar_texto(tema: str = "tema"):
+# 🧠 Gerar resposta com OpenAI
+def gerar_resposta(input_usuario, contexto):
+    prompt = f"Baseando-se no seguinte conteúdo:\n{contexto}\n\nGere uma resposta curta e gramatical para: '{input_usuario}'\nResposta curta (máx. 100 caracteres):"
     try:
-        repo_state = scan_repository()
-
-        prompt = (
-            f"Gere uma única frase bem curta e direta sobre o tema abaixo.\n"
-            f"Tema: {tema}\n"
-            f"Arquivos no projeto: {repo_state[:500]}\n"
-            f"Nada de parágrafo, apenas uma frase."
-        )
-
-        response = client.chat.completions.create(
-            model=MODEL_NAME,
+        resposta = openai.ChatCompletion.create(
+            model="gpt-5.2",
             messages=[
-                {
-                    "role": "system",
-                    "content": "Responda sempre com apenas UMA frase curta e direta, no máximo 120 caracteres. Sem explicações."
-                },
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ]
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=100,
+            temperature=0.7
         )
-
-        reply = response.choices[0].message.content or ""
-        return reply[:140] if reply else "Erro: resposta vazia."
-
+        return resposta.choices[0].message.content.strip()
     except Exception as e:
         return f"Erro: {str(e)}"
+
+# 📬 Rota da API
+@app.route("/api/chatbot", methods=["POST"])
+def chatbot():
+    data = request.get_json()
+    entrada = data.get("input", "")
+    if not entrada:
+        return jsonify({"reply": "Nenhuma entrada recebida."}), 400
+
+    contexto = ler_todos_txt()
+    resposta = gerar_resposta(entrada, contexto)
+    return jsonify({"reply": resposta})
+
+# ▶️ Rodar localmente (modo dev)
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000)
+
+# ✅ Exemplo de uso:
+# POST em /api/chatbot com JSON: {"input": "o que devo escrever no menu de ajuda?"}
+# Resposta: {"reply": "Dê instruções claras para o jogador."}
+
+# 🔧 .env esperado:
+# OPENAI_API_KEY=sua-chave-da-openai
+# REPO_URL=https://github.com/seu-usuario/seu-repositorio
