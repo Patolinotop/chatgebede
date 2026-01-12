@@ -1,8 +1,8 @@
 # ================================
 # MENU EB – Backend Chatbot (REPLIT READY)
-# Modelo: gpt-4o-mini
-# Objetivo: analisar TODOS os .txt do repositório e gerar texto natural
-# Status: FINAL, AJUSTADO PARA USO POR TEMA
+# Modelo: gpt-4o-mini (qualidade alta + custo baixo)
+# Função: gerar texto curto por TEMA usando .txt do GitHub como base silenciosa
+# Status: FINAL, COM HEADERS E JSON GARANTIDOS
 # ================================
 
 # ----------------
@@ -13,7 +13,7 @@
 # python-dotenv
 # requests
 
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, make_response
 import os
 import requests
 from dotenv import load_dotenv
@@ -41,7 +41,7 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 app = Flask(__name__)
 
 # ================================
-# GitHub API – ler TODOS os .txt
+# GitHub API – ler TODOS os .txt (recursivo)
 # ================================
 
 def listar_txt(path=""):
@@ -64,30 +64,28 @@ def ler_contexto():
     for url in listar_txt():
         try:
             r = requests.get(url, timeout=10)
-            if r.status_code == 200:
+            if r.status_code == 200 and r.text:
                 textos.append(r.text)
         except Exception:
             pass
     return "\n".join(textos)
 
 # ================================
-# OpenAI – geração por TEMA
+# OpenAI – geração por TEMA (sem citar fontes)
 # ================================
 
 def gerar_resposta(tema: str, contexto: str) -> str:
     system_msg = (
         "Você escreve como um humano. "
         "NUNCA cite arquivos, fontes ou contexto. "
+        "NÃO faça perguntas. "
         "NÃO explique o processo. "
-        "Use o contexto apenas como base de conhecimento silenciosa. "
-        "Produza um texto curto, natural e fluido, como se alguém tivesse digitado. "
+        "Use o conhecimento implícito apenas como base silenciosa. "
+        "Produza um texto curto, natural e fluido. "
         "Máximo absoluto: 100 caracteres."
     )
 
-    user_msg = (
-        f"Tema: {tema}\n"
-        "Escreva um texto curto e natural sobre o tema, usando o conhecimento implícito."
-    )
+    user_msg = f"Tema: {tema}. Gere um texto curto e natural sobre o tema."
 
     try:
         resp = client.responses.create(
@@ -119,12 +117,16 @@ def chatbot():
     tema = data.get("input", "").strip()
 
     if not tema:
-        return jsonify({"reply": "Entrada vazia"}), 400
+        resp = jsonify({"reply": "Entrada vazia"})
+        return make_response(resp, 200)
 
     contexto = ler_contexto()
     resposta = gerar_resposta(tema, contexto)
 
-    return jsonify({"reply": resposta})
+    resp = jsonify({"reply": resposta})
+    response = make_response(resp, 200)
+    response.headers["Content-Type"] = "application/json; charset=utf-8"
+    return response
 
 # ================================
 # START (Replit)
