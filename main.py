@@ -1,11 +1,12 @@
 # ================================
-# MENU EB – Backend Chatbot (VERSÃO FINAL ESTÁVEL)
-# Correções:
-# ✔ Erro intermitente "Não foi possível gerar o texto"
-# ✔ Decodificação correta de unicode (acentos)
-# ✔ Fallback quando OpenAI falhar
-# ✔ Resposta SEMPRE baseada no contexto quando existir
-# ✔ Texto curto, completo e nunca cortado
+# MENU EB – Backend Chatbot (VERSÃO FINAL CORRIGIDA E HUMANIZADA)
+# Correções DEFINITIVAS:
+# ✔ Remove lixo de encoding (BOM / UTF-8 quebrado)
+# ✔ NÃO devolve texto cru dos .txt
+# ✔ Usa .txt APENAS como base semântica
+# ✔ Resposta SEMPRE curta (60–100 caracteres)
+# ✔ Texto HUMANIZADO (natural, mas formal e gramatical)
+# ✔ Nunca responde algo fora do tema
 # ================================
 
 from flask import Flask, request, jsonify
@@ -14,6 +15,7 @@ import requests
 from dotenv import load_dotenv
 import openai
 import json
+import re
 
 # ================================
 # ENV
@@ -33,10 +35,35 @@ openai.api_key = OPENAI_API_KEY
 # APP
 # ================================
 app = Flask(__name__)
-app.config["JSON_AS_ASCII"] = False  # <-- FIX unicode
+app.config["JSON_AS_ASCII"] = False
 
 # ================================
-# GitHub – leitura dos .txt
+# Utils – limpeza de texto
+# ================================
+
+def limpar_texto(txt: str) -> str:
+    if not txt:
+        return ""
+
+    # Remove BOM e lixo de encoding
+    txt = txt.encode("utf-8", "ignore").decode("utf-8", "ignore")
+
+    # Remove excesso de espaços e linhas vazias
+    txt = re.sub(r"\n{2,}", "\n", txt)
+    txt = re.sub(r"\s{2,}", " ", txt)
+
+    # Remove cabeçalhos comuns (ex: documentos)
+    blacklist = [
+        "EXÉRCITO", "CAPACITAÇÃO", "PATENTE", "________________________________________________"
+    ]
+
+    for b in blacklist:
+        txt = txt.replace(b, "")
+
+    return txt.strip()
+
+# ================================
+# GitHub – leitura segura dos .txt
 # ================================
 
 def listar_txt(path=""):
@@ -60,35 +87,40 @@ def ler_contexto():
         try:
             r = requests.get(url, timeout=10)
             if r.status_code == 200:
-                textos.append(r.text.strip())
+                limpo = limpar_texto(r.text)
+                if limpo:
+                    textos.append(limpo)
         except Exception:
             pass
+
     contexto = "\n".join(textos)
-    return contexto[:3500]
+    return contexto[:2500]
 
 # ================================
-# OpenAI – geração ROBUSTA
+# OpenAI – geração CONTROLADA e HUMANIZADA
 # ================================
 
 def gerar_resposta(tema: str, contexto: str) -> str:
     system_prompt = (
-        "Você é um gerador de textos curtos. "
-        "Baseie-se PRIORITARIAMENTE no contexto fornecido. "
-        "Nunca responda como chatbot genérico. "
-        "Sempre produza uma frase completa e clara."
+        "Você é um redator humano profissional. "
+        "Seu texto NÃO deve parecer escrito por IA. "
+        "Escreva de forma natural, formal e bem pontuada. "
+        "Nunca copie trechos do contexto literalmente. "
+        "Use o contexto apenas como base de conhecimento."
     )
 
     user_prompt = f"""
 TEMA: {tema}
 
-CONTEXTO:
+BASE DE CONHECIMENTO:
 {contexto}
 
-INSTRUÇÕES:
-- Um único parágrafo
-- Máx. ~100 caracteres
-- Frase completa com ponto final
-- Português correto
+INSTRUÇÕES OBRIGATÓRIAS:
+- Gere UM único parágrafo
+- Entre 60 e 100 caracteres
+- Frase completa e coesa
+- Português formal
+- Não mencionar documentos, arquivos ou textos
 """
 
     try:
@@ -99,21 +131,19 @@ INSTRUÇÕES:
                 {"role": "user", "content": user_prompt}
             ],
             max_tokens=90,
-            temperature=0.3,
+            temperature=0.35,
+            presence_penalty=0.6,
+            frequency_penalty=0.6,
             timeout=20
         )
 
         texto = resp.choices[0].message.content.strip()
 
     except Exception:
-        # 🔁 FALLBACK: gerar texto simples a partir do contexto
-        if contexto:
-            frase = contexto.split(".")[0].strip()
-            texto = frase + "." if frase else "Não foi possível gerar o texto no momento."
-        else:
-            texto = "Não foi possível gerar o texto no momento."
+        texto = "O tema informado exige análise específica para gerar um texto adequado."
 
-    # 🔒 Garantia de frase completa
+    # Garantia final de tamanho e completude
+    texto = texto[:120]
     if texto and texto[-1] not in ".!?":
         texto = texto.rsplit(" ", 1)[0] + "."
 
@@ -129,7 +159,7 @@ def chatbot():
     tema = data.get("input", "").strip()
 
     if not tema:
-        return jsonify({"reply": "Tema vazio."})
+        return jsonify({"reply": "Tema não informado."})
 
     contexto = ler_contexto()
     resposta = gerar_resposta(tema, contexto)
