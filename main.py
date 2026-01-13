@@ -80,15 +80,35 @@ def ler_contexto():
 
 def gerar_resposta(tema: str, contexto: str):
     system_prompt = (
-        "Você é um redator humano profissional. "
-        "Escreva um texto curto, formal e gramatical. "
-        "Não use gírias."
+        "Você é um redator humano profissional e analista de documentos. "
+        "Sua tarefa é interpretar o CONTEXTO fornecido e gerar um texto coerente "
+        "baseado exclusivamente nele. "
+        "Não invente informações externas e não use conhecimento genérico da vida real. "
+        "Use linguagem formal, gramaticalmente correta e natural, como um humano escreveria."
     )
 
     user_prompt = (
-        f"TEMA: {tema}\n"
-        f"BASE SEMÂNTICA: {contexto}\n"
-        "Gere um único parágrafo entre 60 e 100 caracteres, frase completa."
+        f"TEMA: {tema}
+
+"
+        "CONTEXTO (documentos de referência):
+"
+        f"{contexto}
+
+"
+        "INSTRUÇÕES OBRIGATÓRIAS:
+"
+        "- Use o contexto acima como base principal da resposta
+"
+        "- Não inclua informações que não possam ser inferidas do contexto
+"
+        "- Gere um único parágrafo
+"
+        "- Tamanho entre 120 e 150 caracteres
+"
+        "- Texto claro, humano, formal e bem pontuado
+"
+        "- Não mencione arquivos, documentos ou fontes"
     )
 
     try:
@@ -100,17 +120,21 @@ def gerar_resposta(tema: str, contexto: str):
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            max_output_tokens=120,
+            max_output_tokens=180,
         )
 
-        # ✅ FORMA CORRETA (documentada)
         texto = response.output_text
 
         if not texto:
             raise RuntimeError("Resposta vazia da OpenAI")
 
-        print("[DEBUG] OpenAI OK")
+        print("[DEBUG] OpenAI OK | chars:", len(texto))
         return texto.strip(), None
+
+    except Exception as e:
+        print("[DEBUG] OpenAI ERRO")
+        traceback.print_exc()
+        return None, str(e)
 
     except Exception as e:
         print("[DEBUG] OpenAI ERRO")
