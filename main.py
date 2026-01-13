@@ -1,14 +1,13 @@
 # ================================
-# MENU EB – Backend Chatbot API (FINAL HUMANIZADO)
+# MENU EB – Backend Chatbot API (DEBUG TOTAL + SEM FALLBACK OCULTO)
 # Objetivo:
-# - Gerar texto curto (60–100 caracteres)
-# - Humanizado, formal e gramatical
-# - Usar .txt apenas como base semântica
-# - Nunca devolver lixo de encoding ou texto gigante
+# - NUNCA usar fallback silencioso
+# - Logar exatamente ONDE e POR QUE falha
+# - Retornar debug controlado quando erro ocorrer
 # ================================
 
-from flask import Flask, request, jsonify
-import os, json, re, requests
+from flask import Flask, request
+import os, json, re, requests, traceback
 from dotenv import load_dotenv
 import openai
 
@@ -17,7 +16,7 @@ import openai
 # ================================
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-GITHUB_REPO = os.getenv("GITHUB_REPO")  # ex: Patolinotop/chatgebede
+GITHUB_REPO = os.getenv("GITHUB_REPO")
 GITHUB_BRANCH = os.getenv("GITHUB_BRANCH", "main")
 
 if not OPENAI_API_KEY or not GITHUB_REPO:
@@ -36,21 +35,20 @@ app.config["JSON_AS_ASCII"] = False
 # ================================
 
 def limpar_texto(txt: str) -> str:
-    if not txt:
-        return ""
     txt = txt.encode("utf-8", "ignore").decode("utf-8", "ignore")
     txt = re.sub(r"\n{2,}", " ", txt)
     txt = re.sub(r"\s{2,}", " ", txt)
     return txt.strip()
 
 # ================================
-# GitHub – leitura dos .txt
+# GitHub
 # ================================
 
 def listar_txt(path=""):
     url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{path}?ref={GITHUB_BRANCH}"
     r = requests.get(url, timeout=10)
     if r.status_code != 200:
+        print("[DEBUG] GitHub API status", r.status_code)
         return []
     arquivos = []
     for item in r.json():
@@ -66,37 +64,25 @@ def ler_contexto():
     for url in listar_txt():
         try:
             r = requests.get(url, timeout=10)
+            print("[DEBUG] TXT fetch", url, r.status_code)
             if r.status_code == 200:
                 textos.append(limpar_texto(r.text))
-        except Exception:
-            pass
-    return " ".join(textos)[:2500]
+        except Exception as e:
+            print("[DEBUG] TXT erro", e)
+    contexto = " ".join(textos)
+    print("[DEBUG] Contexto size", len(contexto))
+    return contexto[:2500]
 
 # ================================
-# Geração de texto
+# OpenAI
 # ================================
 
-def gerar_resposta(tema: str, contexto: str) -> str:
-    system_prompt = (
-        "Você é um redator humano profissional. "
-        "Escreva textos naturais, formais e bem pontuados. "
-        "Não use gírias nem linguagem de IA."
-    )
-
-    user_prompt = f"""
-TEMA: {tema}
-
-BASE SEMÂNTICA:
-{contexto}
-
-INSTRUÇÕES:
-- Um único parágrafo
-- Entre 60 e 100 caracteres
-- Frase completa
-- Não citar documentos ou arquivos
-"""
+def gerar_resposta(tema: str, contexto: str):
+    system_prompt = "Redija um texto humano, formal e curto."
+    user_prompt = f"Tema: {tema}\nContexto: {contexto}\nTexto:" 
 
     try:
+        print("[DEBUG] Chamando OpenAI")
         resp = openai.ChatCompletion.create(
             model="gpt-3.5-turbo",
             messages=[
@@ -105,18 +91,16 @@ INSTRUÇÕES:
             ],
             max_tokens=90,
             temperature=0.35,
-            presence_penalty=0.6,
-            frequency_penalty=0.6,
             timeout=20
         )
         texto = resp.choices[0].message.content.strip()
-    except Exception:
-        texto = f"O tema {tema} envolve aspectos relevantes que exigem clareza e organização."
+        print("[DEBUG] OpenAI OK")
+        return texto, None
 
-    if texto and texto[-1] not in ".!?":
-        texto = texto.rsplit(" ", 1)[0] + "."
-
-    return texto[:120]
+    except Exception as e:
+        print("[DEBUG] OpenAI ERRO:")
+        traceback.print_exc()
+        return None, str(e)
 
 # ================================
 # API
@@ -128,18 +112,36 @@ def chatbot():
     tema = data.get("input", "").strip()
 
     if not tema:
-        return jsonify({"reply": "Tema não informado."})
+        return app.response_class(
+            response=json.dumps({"error": "Tema vazio"}, ensure_ascii=False),
+            mimetype="application/json"
+        )
+
+    print("[DEBUG] Tema:", tema)
 
     contexto = ler_contexto()
-    resposta = gerar_resposta(tema, contexto)
+    texto, erro = gerar_resposta(tema, contexto)
+
+    if erro:
+        return app.response_class(
+            response=json.dumps({
+                "error": "openai_failed",
+                "detail": erro,
+                "context_size": len(contexto)
+            }, ensure_ascii=False),
+            mimetype="application/json"
+        )
+
+    if texto and texto[-1] not in ".!?":
+        texto = texto.rsplit(" ", 1)[0] + "."
 
     return app.response_class(
-        response=json.dumps({"reply": resposta}, ensure_ascii=False),
+        response=json.dumps({"reply": texto}, ensure_ascii=False),
         mimetype="application/json"
     )
 
 # ================================
-# START (Railway)
+# START
 # ================================
 
 if __name__ == "__main__":
