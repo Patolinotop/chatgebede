@@ -1,20 +1,18 @@
 # ================================
 # MENU EB – Backend Chatbot API (ANÁLISE SEMÂNTICA CONTROLADA)
-# STATUS: ATUALIZADO – MAIS ANCORADO, MENOS ALUCINAÇÃO
+# STATUS: ATUALIZADO – MENOS ALUCINAÇÃO E SEM "CORTE DO NADA"
 #
-# PRINCIPAIS AJUSTES (SEM MUDAR A LÓGICA DO PROJETO):
-# - Troca de modelo default para melhor custo/benefício (gpt-4o-mini)
-# - Contexto não é mais "bloco amorfo": agora é RECORTADO por RELEVÂNCIA ao tema
-# - Prompt mais rígido contra inferência externa + instrução de "não preencher lacunas"
-# - Temperatura baixa
-# - Validação de comprimento (120–160 caracteres) e fallback seguro
-# - Cache simples (lista de .txt e conteúdo) para estabilidade e performance
-# - Melhorias de robustez: rate-limit GitHub (token opcional), timeouts, logs
+# O QUE FOI ARRUMADO (SEM AUMENTAR LIMITE DE GERAÇÃO):
+# - O texto NÃO é mais cortado na marra por caracteres
+# - Se vier longo/curto/incompleto, faz 2ª chamada pedindo REESCRITA 120–160 chars
+# - Detector de resposta "cortada" (termina com vírgula, conjunção, preposição, etc.)
+# - Contexto por relevância para reduzir mistura de assuntos
+# - Modelo padrão melhor custo/benefício: gpt-4o-mini (troca via OPENAI_MODEL)
 # ================================
 
 from flask import Flask, request
 import os, json, re, requests, traceback, time
-from typing import List, Tuple, Dict
+from typing import List, Tuple, Dict, Optional
 from dotenv import load_dotenv
 from openai import OpenAI
 
@@ -24,15 +22,14 @@ from openai import OpenAI
 load_dotenv()
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")  # bom custo/benefício :contentReference[oaicite:1]{index=1}
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
 GITHUB_REPO = os.getenv("GITHUB_REPO")
 GITHUB_BRANCH = os.getenv("GITHUB_BRANCH", "main")
-GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")  # opcional (evita rate limit)
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")  # opcional
 
-# Cache (segundos)
-CACHE_TTL_FILES = int(os.getenv("CACHE_TTL_FILES", "300"))     # 5 min
-CACHE_TTL_TEXTS = int(os.getenv("CACHE_TTL_TEXTS", "300"))     # 5 min
+CACHE_TTL_FILES = int(os.getenv("CACHE_TTL_FILES", "300"))  # 5 min
+CACHE_TTL_TEXTS = int(os.getenv("CACHE_TTL_TEXTS", "300"))  # 5 min
 
 if not OPENAI_API_KEY or not GITHUB_REPO:
     raise RuntimeError("Variáveis de ambiente ausentes (OPENAI_API_KEY, GITHUB_REPO)")
@@ -60,24 +57,23 @@ TERMOS_FIXOS = [
 ]
 
 def aplicar_capitalizacao(texto: str) -> str:
-    # Mais robusto para termos com espaços/siglas
     for termo in TERMOS_FIXOS:
         pattern = r"(?<!\w)" + re.escape(termo) + r"(?!\w)"
         texto = re.sub(pattern, termo, texto, flags=re.IGNORECASE)
     return texto
 
 def normalizar_palavras(s: str) -> List[str]:
-    # tokens simples (sem embeddings) pra selecionar trechos relevantes
     s = s.lower()
     s = re.sub(r"[^a-zà-ú0-9\s]", " ", s, flags=re.IGNORECASE)
     parts = [p for p in s.split() if len(p) >= 3]
-    # remove alguns termos muito genéricos
-    stop = {"para", "com", "sem", "sobre", "como", "qual", "quais", "porque", "porquê",
-            "uma", "uns", "umas", "dos", "das", "que", "não", "nos", "nas", "entre"}
+    stop = {
+        "para", "com", "sem", "sobre", "como", "qual", "quais", "porque", "porquê",
+        "uma", "uns", "umas", "dos", "das", "que", "não", "nos", "nas", "entre",
+        "sua", "seu", "suas", "seus", "esse", "essa", "isso", "aquele", "aquela"
+    }
     return [p for p in parts if p not in stop]
 
 def pontuar_relevancia(tema: str, trecho: str) -> int:
-    # score bem simples (mas já reduz alucinação por “mistura geral”)
     t = set(normalizar_palavras(tema))
     if not t:
         return 0
@@ -85,7 +81,6 @@ def pontuar_relevancia(tema: str, trecho: str) -> int:
     return len(t.intersection(x))
 
 def dividir_em_trechos(texto: str, chunk_size: int = 900) -> List[str]:
-    # quebra por tamanho, tentando respeitar pontos finais
     texto = limpar_texto(texto)
     if len(texto) <= chunk_size:
         return [texto]
@@ -93,7 +88,6 @@ def dividir_em_trechos(texto: str, chunk_size: int = 900) -> List[str]:
     i = 0
     while i < len(texto):
         j = min(i + chunk_size, len(texto))
-        # tenta cortar em ponto final para evitar pedaços “quebrados”
         cut = texto.rfind(".", i, j)
         if cut != -1 and cut > i + 200:
             j = cut + 1
@@ -106,21 +100,45 @@ def garantir_pontuacao_final(texto: str) -> str:
     if not texto:
         return texto
     if texto[-1] not in ".!?":
-        texto = texto.rsplit(" ", 1)[0] + "."
+        # se terminar com vírgula/ dois-pontos/ ponto-e-vírgula etc, substitui por ponto
+        texto = re.sub(r"[,:;–—-]\s*$", "", texto).strip()
+        if texto and texto[-1] not in ".!?":
+            texto += "."
     return texto
 
-def ajustar_tamanho(texto: str, min_c: int = 120, max_c: int = 160) -> str:
-    texto = texto.strip()
-    if len(texto) > max_c:
-        # corta no último espaço antes do limite e pontua
-        texto = texto[:max_c]
-        texto = texto.rsplit(" ", 1)[0].strip()
-        texto = garantir_pontuacao_final(texto)
-    elif len(texto) < min_c:
-        # não inventa pra “encher”: mantém seguro e formal
-        # (o prompt também tenta segurar isso)
-        texto = garantir_pontuacao_final(texto)
-    return texto
+def contar_chars(texto: str) -> int:
+    return len(texto)
+
+def resposta_parece_cortada(texto: str) -> bool:
+    """
+    Heurística: detecta finais típicos de truncamento.
+    """
+    t = texto.strip()
+    if not t:
+        return True
+
+    # termina com pontuação "aberta" ou vírgula
+    if re.search(r"[,;:–—-]\s*$", t):
+        return True
+
+    # termina com palavra “pendente”
+    ultima = re.sub(r"[^\wà-ú]+$", "", t.lower()).split()[-1] if t.split() else ""
+    pendentes = {
+        "e", "ou", "para", "por", "de", "do", "da", "dos", "das", "no", "na", "nos", "nas",
+        "em", "ao", "aos", "à", "às", "com", "sem", "sobre", "entre", "que"
+    }
+    if ultima in pendentes:
+        return True
+
+    # se não termina com .!? e tem cara de frase longa, pode ter truncado
+    if t[-1] not in ".!?" and len(t) >= 90:
+        return True
+
+    return False
+
+def dentro_da_faixa(texto: str, min_c: int = 120, max_c: int = 160) -> bool:
+    n = contar_chars(texto)
+    return (min_c <= n <= max_c)
 
 # ================================
 # GitHub – leitura dos .txt (com cache)
@@ -135,9 +153,8 @@ def _github_headers() -> Dict[str, str]:
     return headers
 
 def listar_txt(path: str = "") -> List[str]:
-    # cache da lista
     now = time.time()
-    if _cache_files["items"] and (now - float(_cache_files["ts"]) < CACHE_TTL_FILES) and path == "":
+    if path == "" and _cache_files["items"] and (now - float(_cache_files["ts"]) < CACHE_TTL_FILES):
         return list(_cache_files["items"])
 
     url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{path}?ref={GITHUB_BRANCH}"
@@ -160,7 +177,6 @@ def listar_txt(path: str = "") -> List[str]:
     return arquivos
 
 def ler_txts() -> List[str]:
-    # cache do conteúdo
     now = time.time()
     if _cache_texts["items"] and (now - float(_cache_texts["ts"]) < CACHE_TTL_TEXTS):
         return list(_cache_texts["items"])
@@ -179,10 +195,6 @@ def ler_txts() -> List[str]:
     return textos
 
 def montar_contexto_relevante(tema: str, max_chars: int = 7000) -> str:
-    """
-    Mantém a lógica (txts como base), mas evita mandar tudo misturado.
-    Seleciona trechos mais relevantes ao tema por sobreposição de palavras.
-    """
     textos = ler_txts()
     trechos: List[Tuple[int, str]] = []
 
@@ -192,9 +204,8 @@ def montar_contexto_relevante(tema: str, max_chars: int = 7000) -> str:
             if score > 0:
                 trechos.append((score, ch))
 
-    # Se o tema for muito vago e não bater nada, pega poucos trechos iniciais
-    # (melhor do que "bloco amorfo" e ajuda perguntas genéricas)
     if not trechos and textos:
+        # fallback: poucos trechos iniciais (sem misturar tudo)
         fallback = []
         for t in textos[:3]:
             fallback.extend(dividir_em_trechos(t, chunk_size=900)[:1])
@@ -220,19 +231,31 @@ def montar_contexto_relevante(tema: str, max_chars: int = 7000) -> str:
     return contexto
 
 # ================================
-# OpenAI – RACIOCÍNIO CONTROLADO (mais rígido)
+# OpenAI – RACIOCÍNIO CONTROLADO (sem corte brusco)
 # ================================
-def gerar_resposta(tema: str, contexto: str) -> Tuple[str, str]:
+def _call_openai(system_prompt: str, user_prompt: str, max_output_tokens: int = 120) -> str:
+    resp = client.responses.create(
+        model=OPENAI_MODEL,
+        input=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        temperature=0.1,
+        max_output_tokens=max_output_tokens,
+    )
+    return (resp.output_text or "").strip()
+
+def gerar_resposta(tema: str, contexto: str) -> Tuple[Optional[str], Optional[str]]:
     """
-    Retorna (texto, erro). Texto deve ser 120–160 caracteres e baseado somente no contexto.
+    1) Gera resposta curta diretamente.
+    2) Se vier fora da faixa ou "cortada", pede reescrita curta (2ª chamada).
     """
     system_prompt = (
         "Você é um analista de normas institucionais. "
         "Use EXCLUSIVAMENTE as informações contidas nos DOCUMENTOS fornecidos. "
         "É PROIBIDO completar lacunas com conhecimento externo, suposições ou práticas comuns. "
-        "Se um detalhe não estiver explícito nos documentos, você deve OMITIR esse detalhe. "
-        "Se os documentos não trouxerem base suficiente para responder ao tema, "
-        "responda de forma formal informando que os documentos não especificam o ponto, sem inventar."
+        "Se um detalhe não estiver explícito, OMITE esse detalhe. "
+        "Você deve entregar texto curto e finalizado, sem cortes."
     )
 
     user_prompt = (
@@ -240,38 +263,74 @@ def gerar_resposta(tema: str, contexto: str) -> Tuple[str, str]:
         "DOCUMENTOS (TRECHOS RELEVANTES):\n"
         f"{contexto}\n\n"
         "REGRAS DE RESPOSTA (OBRIGATÓRIO):\n"
-        "1) Responda APENAS sobre o tema/pergunta.\n"
-        "2) Use SOMENTE o que está nos documentos (sem inferir, sem generalizar, sem 'completar').\n"
-        "3) Não copie frases inteiras dos documentos; reescreva com suas palavras.\n"
+        "1) Responda APENAS sobre o tema.\n"
+        "2) Use SOMENTE o que está nos documentos (sem inferir).\n"
+        "3) Não copie frases inteiras; reescreva.\n"
         "4) Produza 1 único parágrafo com 120 a 160 caracteres (contando espaços).\n"
-        "5) Linguagem formal, humana e objetiva.\n"
-        "6) Se o tema for amplo, foque no conceito central que aparece nos documentos.\n"
+        "5) Termine com ponto final.\n"
+        "6) Se o tema for amplo, foque no conceito central presente nos documentos.\n"
     )
 
     try:
-        response = client.responses.create(
-            model=OPENAI_MODEL,
-            input=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            temperature=0.2,            # reduz criatividade/alucinação
-            max_output_tokens=120       # suficiente para 120–160 caracteres em PT
-        )
-
-        texto = (response.output_text or "").strip()
+        texto = _call_openai(system_prompt, user_prompt, max_output_tokens=120)
         if not texto:
             raise RuntimeError("Resposta vazia da OpenAI")
 
         texto = aplicar_capitalizacao(texto)
-        texto = ajustar_tamanho(texto, 120, 160)
         texto = garantir_pontuacao_final(texto)
 
-        # Garantia extra: se ainda sair MUITO fora da faixa, aplica fallback seguro
-        if len(texto) < 80 or len(texto) > 220:
-            texto = "Os documentos disponíveis não especificam detalhes suficientes sobre o tema solicitado, sem base para afirmar regras adicionais."
-            texto = ajustar_tamanho(texto, 120, 160)
+        # Se não ficou dentro da faixa OU parece truncada -> reescrita guiada (sem aumentar tokens)
+        if (not dentro_da_faixa(texto, 120, 160)) or resposta_parece_cortada(texto):
+            rewrite_prompt = (
+                f"TEMA/PERGUNTA: {tema}\n\n"
+                "DOCUMENTOS (TRECHOS RELEVANTES):\n"
+                f"{contexto}\n\n"
+                "TEXTO ATUAL (NÃO CONFIE NELE SE ESTIVER LONGO/CORTADO):\n"
+                f"{texto}\n\n"
+                "TAREFA:\n"
+                "- REESCREVA o conteúdo acima para ficar ENTRE 120 e 160 caracteres (com espaços).\n"
+                "- Mantenha SOMENTE informações explícitas nos documentos.\n"
+                "- 1 único parágrafo, formal, objetivo.\n"
+                "- Termine com ponto final.\n"
+                "- Não use vírgula no final nem deixe frase incompleta.\n"
+            )
+            texto2 = _call_openai(system_prompt, rewrite_prompt, max_output_tokens=120).strip()
+            if texto2:
+                texto2 = aplicar_capitalizacao(texto2)
+                texto2 = garantir_pontuacao_final(texto2)
+
+                # se a reescrita melhorou, usa ela
+                if dentro_da_faixa(texto2, 120, 160) and not resposta_parece_cortada(texto2):
+                    texto = texto2
+                else:
+                    # último ajuste leve: se passou um pouquinho, tenta limpar excesso sem cortar no meio
+                    # (ainda assim sem inventar)
+                    # remove espaços duplos e garante ponto
+                    texto = re.sub(r"\s{2,}", " ", texto2 if texto2 else texto).strip()
+                    texto = garantir_pontuacao_final(texto)
+
+        # fallback seguro se ainda ficou ruim
+        if (not dentro_da_faixa(texto, 120, 160)) or resposta_parece_cortada(texto):
+            texto = "Os documentos disponíveis não especificam, de forma suficiente, detalhes sobre o tema solicitado para afirmar regras adicionais."
+            texto = aplicar_capitalizacao(texto)
             texto = garantir_pontuacao_final(texto)
+
+            # garante faixa sem “cortar do nada”: pede reescrita do fallback se necessário
+            if not dentro_da_faixa(texto, 120, 160):
+                fallback_prompt = (
+                    "Reescreva o texto a seguir para ficar ENTRE 120 e 160 caracteres (com espaços), "
+                    "1 parágrafo formal e terminando com ponto:\n"
+                    f"{texto}"
+                )
+                texto_fb = _call_openai(
+                    "Você é um redator técnico. Mantenha o sentido, sem adicionar fatos novos.",
+                    fallback_prompt,
+                    max_output_tokens=120
+                ).strip()
+                if texto_fb:
+                    texto_fb = garantir_pontuacao_final(texto_fb)
+                    if dentro_da_faixa(texto_fb, 120, 160) and not resposta_parece_cortada(texto_fb):
+                        texto = texto_fb
 
         return texto, None
 
@@ -293,10 +352,9 @@ def chatbot():
             mimetype="application/json"
         )
 
-    # Contexto por relevância (evita misturar assuntos e “inventar ponte”)
     contexto = montar_contexto_relevante(tema, max_chars=7000)
-
     texto, erro = gerar_resposta(tema, contexto)
+
     if erro:
         return app.response_class(
             response=json.dumps({"error": "openai_failed", "detail": erro}, ensure_ascii=False),
