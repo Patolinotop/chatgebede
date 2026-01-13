@@ -1,12 +1,13 @@
 # ================================
-# MENU EB – Backend Chatbot API (FINAL ESTÁVEL + CONTEXTO FORÇADO)
-# STATUS: CORRIGIDO (SyntaxError FIX)
+# MENU EB – Backend Chatbot API (GROUNDING ESTRITO + REGRAS FIXAS)
+# STATUS: FINAL COM CONTROLE DE FIDELIDADE AO TEXTO
 #
-# ✔ Corrige f-string quebrada
-# ✔ Usa OpenAI >=1.0 corretamente (Responses API)
-# ✔ Força uso do contexto dos .txt
-# ✔ Texto 120–150 caracteres
-# ✔ DEBUG claro no Railway
+# OBJETIVOS:
+# ✔ NÃO misturar regras (zero inferência fora do texto)
+# ✔ NÃO extrapolar funções (CDP, promoções etc)
+# ✔ Responder APENAS o que está explicitamente no contexto
+# ✔ Forçar capitalização de termos institucionais
+# ✔ Texto humano, formal e fiel aos .txt
 # ================================
 
 from flask import Flask, request
@@ -19,7 +20,7 @@ from openai import OpenAI
 # ================================
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-GITHUB_REPO = os.getenv("GITHUB_REPO")  # ex: Patolinotop/chatgebede
+GITHUB_REPO = os.getenv("GITHUB_REPO")
 GITHUB_BRANCH = os.getenv("GITHUB_BRANCH", "main")
 
 if not OPENAI_API_KEY or not GITHUB_REPO:
@@ -42,6 +43,17 @@ def limpar_texto(txt: str) -> str:
     txt = re.sub(r"\n{2,}", " ", txt)
     txt = re.sub(r"\s{2,}", " ", txt)
     return txt.strip()
+
+# Capitalização forçada de termos institucionais
+TERMOS_FIXOS = [
+    "Graduados", "Praças", "Oficiais", "Exército Brasileiro",
+    "CDP", "BPE", "Promoções", "Recrutamento"
+]
+
+def aplicar_capitalizacao(texto: str) -> str:
+    for termo in TERMOS_FIXOS:
+        texto = re.sub(rf"\b{termo.lower()}\b", termo, texto, flags=re.IGNORECASE)
+    return texto
 
 # ================================
 # GitHub – leitura dos .txt
@@ -72,35 +84,38 @@ def ler_contexto():
                 textos.append(limpar_texto(r.text))
         except Exception as e:
             print("[DEBUG] TXT erro", e)
-    contexto = " ".join(textos)
+    contexto = " \n".join(textos)
     print("[DEBUG] Contexto size", len(contexto))
-    return contexto[:2500]
+    return contexto[:3000]
 
 # ================================
-# OpenAI (API NOVA – FORÇANDO CONTEXTO)
+# OpenAI – GROUNDING ESTRITO
 # ================================
 
 def gerar_resposta(tema: str, contexto: str):
     system_prompt = (
-        "Você é um redator humano profissional e analista de documentos. "
-        "Utilize EXCLUSIVAMENTE as informações presentes no CONTEXTO fornecido. "
-        "Não invente dados externos e não use conhecimento genérico. "
-        "Escreva de forma formal, clara e gramaticalmente correta."
+        "Você é um analista técnico de documentos institucionais. "
+        "Sua função é resumir e explicar informações APENAS se elas "
+        "estiverem explicitamente descritas no CONTEXTO fornecido. "
+        "É PROIBIDO inferir, deduzir, extrapolar ou completar lacunas. "
+        "Se uma informação não estiver clara no texto, ela NÃO deve ser incluída."
     )
 
     user_prompt = (
-        f"TEMA: {tema}\n\n"
-        "CONTEXTO (documentos internos):\n"
+        f"TEMA CONSULTADO: {tema}\n\n"
+        "CONTEXTO OFICIAL (única fonte permitida):\n"
         f"{contexto}\n\n"
-        "INSTRUÇÕES:\n"
-        "- Baseie-se apenas no contexto acima\n"
-        "- Gere um único parágrafo\n"
-        "- Entre 120 e 150 caracteres\n"
-        "- Não mencione arquivos, fontes ou IA"
+        "REGRAS OBRIGATÓRIAS:\n"
+        "- Utilize somente informações explícitas no contexto\n"
+        "- NÃO misture responsabilidades diferentes\n"
+        "- NÃO crie relações que o texto não estabelece\n"
+        "- Se o tema não for encontrado claramente, responda: 'Tema não descrito no material.'\n"
+        "- Gere um único parágrafo entre 120 e 150 caracteres\n"
+        "- Linguagem formal, humana e objetiva"
     )
 
     try:
-        print("[DEBUG] Chamando OpenAI (Responses)")
+        print("[DEBUG] Chamando OpenAI (Grounded)")
         response = client.responses.create(
             model="gpt-4.1-mini",
             input=[
@@ -115,6 +130,12 @@ def gerar_resposta(tema: str, contexto: str):
             raise RuntimeError("Resposta vazia da OpenAI")
 
         texto = texto.strip()
+        texto = aplicar_capitalizacao(texto)
+
+        # garante frase completa
+        if texto[-1] not in ".!?":
+            texto = texto.rsplit(" ", 1)[0] + "."
+
         print("[DEBUG] OpenAI OK | chars:", len(texto))
         return texto, None
 
@@ -153,16 +174,13 @@ def chatbot():
             mimetype="application/json"
         )
 
-    if texto and texto[-1] not in ".!?":
-        texto = texto.rsplit(" ", 1)[0] + "."
-
     return app.response_class(
         response=json.dumps({"reply": texto}, ensure_ascii=False),
         mimetype="application/json"
     )
 
 # ================================
-# START (Railway)
+# START
 # ================================
 
 if __name__ == "__main__":
