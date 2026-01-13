@@ -1,11 +1,10 @@
 # ================================
-# MENU EB – Backend Chatbot API (OPENAI >=1.0 FIX FINAL + DEBUG)
-# CORREÇÃO DEFINITIVA:
-# ✔ Remove uso de openai.ChatCompletion (DESCONTINUADO)
-# ✔ Usa API NOVA openai>=1.0 (Responses)
-# ✔ Mantém DEBUG explícito (sem fallback oculto)
-# ✔ Retorna `reply` somente quando OpenAI responder
-# ✔ Retorna `error` técnico quando falhar
+# MENU EB – Backend Chatbot API (OPENAI >=1.0 CORREÇÃO DEFINITIVA)
+# FIX CRÍTICO:
+# ✔ Corrige leitura do objeto Response (NÃO é dict)
+# ✔ Remove uso incorreto de item.get
+# ✔ Extrai texto pelo atributo oficial: response.output_text
+# ✔ Mantém DEBUG TOTAL
 # ================================
 
 from flask import Flask, request
@@ -76,14 +75,14 @@ def ler_contexto():
     return contexto[:2500]
 
 # ================================
-# OpenAI (API NOVA)
+# OpenAI (API NOVA – CORRETA)
 # ================================
 
 def gerar_resposta(tema: str, contexto: str):
     system_prompt = (
         "Você é um redator humano profissional. "
         "Escreva um texto curto, formal e gramatical. "
-        "Não use gírias. Não cite documentos."
+        "Não use gírias."
     )
 
     user_prompt = (
@@ -94,7 +93,8 @@ def gerar_resposta(tema: str, contexto: str):
 
     try:
         print("[DEBUG] Chamando OpenAI (Responses)")
-        resp = client.responses.create(
+
+        response = client.responses.create(
             model="gpt-4.1-mini",
             input=[
                 {"role": "system", "content": system_prompt},
@@ -103,17 +103,14 @@ def gerar_resposta(tema: str, contexto: str):
             max_output_tokens=120,
         )
 
-        # Extrai texto com segurança
-        texto = ""
-        for item in resp.output:
-            if item.get("type") == "message":
-                for c in item.get("content", []):
-                    if c.get("type") == "output_text":
-                        texto += c.get("text", "")
+        # ✅ FORMA CORRETA (documentada)
+        texto = response.output_text
 
-        texto = texto.strip()
+        if not texto:
+            raise RuntimeError("Resposta vazia da OpenAI")
+
         print("[DEBUG] OpenAI OK")
-        return texto, None
+        return texto.strip(), None
 
     except Exception as e:
         print("[DEBUG] OpenAI ERRO")
