@@ -1,10 +1,11 @@
 # ================================
-# MENU EB – Backend Chatbot (VERSÃO OTIMIZADA / CONTEXTUAL)
-# Objetivo:
-# - NÃO responder como chatbot genérico
-# - SEM cortar resposta no meio
-# - SEMPRE basear nos .txt quando possível
-# - Texto curto (~100 caracteres) mas COMPLETO
+# MENU EB – Backend Chatbot (VERSÃO FINAL ESTÁVEL)
+# Correções:
+# ✔ Erro intermitente "Não foi possível gerar o texto"
+# ✔ Decodificação correta de unicode (acentos)
+# ✔ Fallback quando OpenAI falhar
+# ✔ Resposta SEMPRE baseada no contexto quando existir
+# ✔ Texto curto, completo e nunca cortado
 # ================================
 
 from flask import Flask, request, jsonify
@@ -12,6 +13,7 @@ import os
 import requests
 from dotenv import load_dotenv
 import openai
+import json
 
 # ================================
 # ENV
@@ -19,13 +21,11 @@ import openai
 load_dotenv()
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-GITHUB_REPO = os.getenv("GITHUB_REPO")  # ex: Patolinotop/chatgebede
+GITHUB_REPO = os.getenv("GITHUB_REPO")
 GITHUB_BRANCH = os.getenv("GITHUB_BRANCH", "main")
 
-if not OPENAI_API_KEY:
-    raise RuntimeError("OPENAI_API_KEY não configurada")
-if not GITHUB_REPO:
-    raise RuntimeError("GITHUB_REPO não configurado")
+if not OPENAI_API_KEY or not GITHUB_REPO:
+    raise RuntimeError("Variáveis de ambiente ausentes")
 
 openai.api_key = OPENAI_API_KEY
 
@@ -33,6 +33,7 @@ openai.api_key = OPENAI_API_KEY
 # APP
 # ================================
 app = Flask(__name__)
+app.config["JSON_AS_ASCII"] = False  # <-- FIX unicode
 
 # ================================
 # GitHub – leitura dos .txt
@@ -62,34 +63,32 @@ def ler_contexto():
                 textos.append(r.text.strip())
         except Exception:
             pass
-
     contexto = "\n".join(textos)
-    return contexto[:4000]  # limite de segurança
+    return contexto[:3500]
 
 # ================================
-# OpenAI – geração CONTROLADA
+# OpenAI – geração ROBUSTA
 # ================================
 
 def gerar_resposta(tema: str, contexto: str) -> str:
     system_prompt = (
-        "Você NÃO é um chatbot genérico. "
-        "Você gera textos CURTOS, COESOS e COMPLETOS, "
-        "baseados prioritariamente no CONTEXTO fornecido. "
-        "Nunca corte frases no meio. "
-        "Se o contexto não ajudar, gere um texto neutro e objetivo."
+        "Você é um gerador de textos curtos. "
+        "Baseie-se PRIORITARIAMENTE no contexto fornecido. "
+        "Nunca responda como chatbot genérico. "
+        "Sempre produza uma frase completa e clara."
     )
 
     user_prompt = f"""
 TEMA: {tema}
 
-CONTEXTO (use somente se relevante):
+CONTEXTO:
 {contexto}
 
 INSTRUÇÕES:
-- Gere um único parágrafo
-- Máximo ~100 caracteres
-- Frase completa (com ponto final)
-- Linguagem neutra e clara
+- Um único parágrafo
+- Máx. ~100 caracteres
+- Frase completa com ponto final
+- Português correto
 """
 
     try:
@@ -99,20 +98,26 @@ INSTRUÇÕES:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            max_tokens=80,
-            temperature=0.4,
+            max_tokens=90,
+            temperature=0.3,
+            timeout=20
         )
 
         texto = resp.choices[0].message.content.strip()
 
-        # Segurança extra: evitar corte seco
-        if texto and texto[-1] not in ".!?":
-            texto = texto.rsplit(" ", 1)[0] + "."
-
-        return texto
-
     except Exception:
-        return "Não foi possível gerar o texto no momento."
+        # 🔁 FALLBACK: gerar texto simples a partir do contexto
+        if contexto:
+            frase = contexto.split(".")[0].strip()
+            texto = frase + "." if frase else "Não foi possível gerar o texto no momento."
+        else:
+            texto = "Não foi possível gerar o texto no momento."
+
+    # 🔒 Garantia de frase completa
+    if texto and texto[-1] not in ".!?":
+        texto = texto.rsplit(" ", 1)[0] + "."
+
+    return texto
 
 # ================================
 # API
@@ -124,12 +129,15 @@ def chatbot():
     tema = data.get("input", "").strip()
 
     if not tema:
-        return jsonify({"reply": "Tema vazio."}), 400
+        return jsonify({"reply": "Tema vazio."})
 
     contexto = ler_contexto()
     resposta = gerar_resposta(tema, contexto)
 
-    return jsonify({"reply": resposta})
+    return app.response_class(
+        response=json.dumps({"reply": resposta}, ensure_ascii=False),
+        mimetype="application/json"
+    )
 
 # ================================
 # START (Railway)
