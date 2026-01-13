@@ -1,23 +1,17 @@
 # ================================
-# MENU EB – Backend Chatbot (REPLIT READY)
-# Modelo: gpt-4o-mini (qualidade alta + custo baixo)
-# Função: gerar texto curto por TEMA usando .txt do GitHub como base silenciosa
-# Status: FINAL, COM HEADERS E JSON GARANTIDOS
+# MENU EB – Backend Chatbot (VERSÃO OTIMIZADA / CONTEXTUAL)
+# Objetivo:
+# - NÃO responder como chatbot genérico
+# - SEM cortar resposta no meio
+# - SEMPRE basear nos .txt quando possível
+# - Texto curto (~100 caracteres) mas COMPLETO
 # ================================
 
-# ----------------
-# requirements.txt
-# ----------------
-# flask
-# openai>=1.0.0
-# python-dotenv
-# requests
-
-from flask import Flask, request, jsonify, make_response
+from flask import Flask, request, jsonify
 import os
 import requests
 from dotenv import load_dotenv
-from openai import OpenAI
+import openai
 
 # ================================
 # ENV
@@ -33,7 +27,7 @@ if not OPENAI_API_KEY:
 if not GITHUB_REPO:
     raise RuntimeError("GITHUB_REPO não configurado")
 
-client = OpenAI(api_key=OPENAI_API_KEY)
+openai.api_key = OPENAI_API_KEY
 
 # ================================
 # APP
@@ -41,7 +35,7 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 app = Flask(__name__)
 
 # ================================
-# GitHub API – ler TODOS os .txt (recursivo)
+# GitHub – leitura dos .txt
 # ================================
 
 def listar_txt(path=""):
@@ -64,48 +58,61 @@ def ler_contexto():
     for url in listar_txt():
         try:
             r = requests.get(url, timeout=10)
-            if r.status_code == 200 and r.text:
-                textos.append(r.text)
+            if r.status_code == 200:
+                textos.append(r.text.strip())
         except Exception:
             pass
-    return "\n".join(textos)
+
+    contexto = "\n".join(textos)
+    return contexto[:4000]  # limite de segurança
 
 # ================================
-# OpenAI – geração por TEMA (sem citar fontes)
+# OpenAI – geração CONTROLADA
 # ================================
 
 def gerar_resposta(tema: str, contexto: str) -> str:
-    system_msg = (
-        "Você escreve como um humano. "
-        "NUNCA cite arquivos, fontes ou contexto. "
-        "NÃO faça perguntas. "
-        "NÃO explique o processo. "
-        "Use o conhecimento implícito apenas como base silenciosa. "
-        "Produza um texto curto, natural e fluido. "
-        "Máximo absoluto: 100 caracteres."
+    system_prompt = (
+        "Você NÃO é um chatbot genérico. "
+        "Você gera textos CURTOS, COESOS e COMPLETOS, "
+        "baseados prioritariamente no CONTEXTO fornecido. "
+        "Nunca corte frases no meio. "
+        "Se o contexto não ajudar, gere um texto neutro e objetivo."
     )
 
-    user_msg = f"Tema: {tema}. Gere um texto curto e natural sobre o tema."
+    user_prompt = f"""
+TEMA: {tema}
+
+CONTEXTO (use somente se relevante):
+{contexto}
+
+INSTRUÇÕES:
+- Gere um único parágrafo
+- Máximo ~100 caracteres
+- Frase completa (com ponto final)
+- Linguagem neutra e clara
+"""
 
     try:
-        resp = client.responses.create(
-            model="gpt-4o-mini",
-            input=[
-                {"role": "system", "content": system_msg},
-                {"role": "user", "content": user_msg},
-                {"role": "user", "content": f"CONHECIMENTO:\n{contexto}"}
+        resp = openai.ChatCompletion.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
             ],
-            max_output_tokens=90,
-            temperature=0.7,
+            max_tokens=80,
+            temperature=0.4,
         )
 
-        text = resp.output_text
-        if not text:
-            return "Sem resposta"
-        return text.strip()[:100]
-    except Exception as e:
-        print("[ERRO OpenAI]", e)
-        return "Erro ao gerar resposta"
+        texto = resp.choices[0].message.content.strip()
+
+        # Segurança extra: evitar corte seco
+        if texto and texto[-1] not in ".!?":
+            texto = texto.rsplit(" ", 1)[0] + "."
+
+        return texto
+
+    except Exception:
+        return "Não foi possível gerar o texto no momento."
 
 # ================================
 # API
@@ -117,28 +124,17 @@ def chatbot():
     tema = data.get("input", "").strip()
 
     if not tema:
-        resp = jsonify({"reply": "Entrada vazia"})
-        return make_response(resp, 200)
+        return jsonify({"reply": "Tema vazio."}), 400
 
     contexto = ler_contexto()
     resposta = gerar_resposta(tema, contexto)
 
-    resp = jsonify({"reply": resposta})
-    response = make_response(resp, 200)
-    response.headers["Content-Type"] = "application/json; charset=utf-8"
-    return response
+    return jsonify({"reply": resposta})
 
 # ================================
-# START (Replit)
+# START (Railway)
 # ================================
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 3000))
+    port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
-
-# ================================
-# .env (exemplo)
-# ================================
-# OPENAI_API_KEY=sk-xxxxxxxx
-# GITHUB_REPO=Patolinotop/chatgebede
-# GITHUB_BRANCH=main
