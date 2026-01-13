@@ -1,13 +1,15 @@
 # ================================
-# MENU EB – Backend Chatbot API (GROUNDING ESTRITO + REGRAS FIXAS)
-# STATUS: FINAL COM CONTROLE DE FIDELIDADE AO TEXTO
+# MENU EB – Backend Chatbot API (ANÁLISE SEMÂNTICA CONTROLADA)
+# STATUS: FINAL – ENTENDE O TEMA, NÃO FOGE, NÃO INVENTA
 #
-# OBJETIVOS:
-# ✔ NÃO misturar regras (zero inferência fora do texto)
-# ✔ NÃO extrapolar funções (CDP, promoções etc)
-# ✔ Responder APENAS o que está explicitamente no contexto
-# ✔ Forçar capitalização de termos institucionais
-# ✔ Texto humano, formal e fiel aos .txt
+# OBJETIVO REAL (AJUSTADO AO QUE VOCÊ EXPLICOU):
+# ✔ Os .txt são a BASE DE CONHECIMENTO
+# ✔ O modelo PODE redigir texto novo (não é ctrl+c ctrl+v)
+# ✔ MAS só usando informações que EXISTEM nos .txt
+# ✔ Pode combinar regras, desde que NÃO se contradigam
+# ✔ NÃO responder fora do tema perguntado
+# ✔ NÃO dizer "tema não descrito" se o termo existir no texto
+# ✔ Se o tema for vago, focar no CONCEITO CENTRAL
 # ================================
 
 from flask import Flask, request
@@ -44,7 +46,6 @@ def limpar_texto(txt: str) -> str:
     txt = re.sub(r"\s{2,}", " ", txt)
     return txt.strip()
 
-# Capitalização forçada de termos institucionais
 TERMOS_FIXOS = [
     "Graduados", "Praças", "Oficiais", "Exército Brasileiro",
     "CDP", "BPE", "Promoções", "Recrutamento"
@@ -79,68 +80,63 @@ def ler_contexto():
     for url in listar_txt():
         try:
             r = requests.get(url, timeout=10)
-            print("[DEBUG] TXT fetch", url, r.status_code)
             if r.status_code == 200:
                 textos.append(limpar_texto(r.text))
-        except Exception as e:
-            print("[DEBUG] TXT erro", e)
+        except Exception:
+            pass
     contexto = " \n".join(textos)
     print("[DEBUG] Contexto size", len(contexto))
-    return contexto[:3000]
+    return contexto[:3500]
 
 # ================================
-# OpenAI – GROUNDING ESTRITO
+# OpenAI – RACIOCÍNIO CONTROLADO
 # ================================
 
 def gerar_resposta(tema: str, contexto: str):
     system_prompt = (
-        "Você é um analista técnico de documentos institucionais. "
-        "Sua função é resumir e explicar informações APENAS se elas "
-        "estiverem explicitamente descritas no CONTEXTO fornecido. "
-        "É PROIBIDO inferir, deduzir, extrapolar ou completar lacunas. "
-        "Se uma informação não estiver clara no texto, ela NÃO deve ser incluída."
+        "Você é um analista de normas institucionais. "
+        "Os documentos fornecidos formam a BASE DE CONHECIMENTO. "
+        "Você deve COMPREENDER o tema perguntado e redigir um texto coerente, "
+        "utilizando apenas informações presentes nesses documentos. "
+        "Você pode reorganizar e combinar informações relacionadas, "
+        "desde que não crie regras novas nem contradições."
     )
 
     user_prompt = (
-        f"TEMA CONSULTADO: {tema}\n\n"
-        "CONTEXTO OFICIAL (única fonte permitida):\n"
+        f"PERGUNTA DO USUÁRIO: {tema}\n\n"
+        "DOCUMENTOS DISPONÍVEIS:\n"
         f"{contexto}\n\n"
-        "REGRAS OBRIGATÓRIAS:\n"
-        "- Utilize somente informações explícitas no contexto\n"
-        "- NÃO misture responsabilidades diferentes\n"
-        "- NÃO crie relações que o texto não estabelece\n"
-        "- Se o tema não for encontrado claramente, responda: 'Tema não descrito no material.'\n"
-        "- Gere um único parágrafo entre 120 e 150 caracteres\n"
+        "INSTRUÇÕES:\n"
+        "- Responda APENAS sobre o tema perguntado\n"
+        "- Se o tema for amplo (ex: importância), foque nas funções e regras descritas\n"
+        "- NÃO responda com informações não relacionadas ao tema\n"
+        "- NÃO copie trechos literalmente\n"
+        "- Gere um único parágrafo entre 120 e 160 caracteres\n"
         "- Linguagem formal, humana e objetiva"
     )
 
     try:
-        print("[DEBUG] Chamando OpenAI (Grounded)")
         response = client.responses.create(
             model="gpt-4.1-mini",
             input=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            max_output_tokens=180
+            max_output_tokens=200
         )
 
         texto = response.output_text
         if not texto:
             raise RuntimeError("Resposta vazia da OpenAI")
 
-        texto = texto.strip()
-        texto = aplicar_capitalizacao(texto)
+        texto = aplicar_capitalizacao(texto.strip())
 
-        # garante frase completa
         if texto[-1] not in ".!?":
             texto = texto.rsplit(" ", 1)[0] + "."
 
-        print("[DEBUG] OpenAI OK | chars:", len(texto))
         return texto, None
 
     except Exception as e:
-        print("[DEBUG] OpenAI ERRO")
         traceback.print_exc()
         return None, str(e)
 
@@ -159,18 +155,12 @@ def chatbot():
             mimetype="application/json"
         )
 
-    print("[DEBUG] Tema:", tema)
-
     contexto = ler_contexto()
     texto, erro = gerar_resposta(tema, contexto)
 
     if erro:
         return app.response_class(
-            response=json.dumps({
-                "error": "openai_failed",
-                "detail": erro,
-                "context_size": len(contexto)
-            }, ensure_ascii=False),
+            response=json.dumps({"error": "openai_failed", "detail": erro}, ensure_ascii=False),
             mimetype="application/json"
         )
 
