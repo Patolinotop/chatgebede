@@ -1,10 +1,12 @@
 # ================================
-# MENU EB – Backend Chatbot API (OPENAI >=1.0 CORREÇÃO DEFINITIVA)
-# FIX CRÍTICO:
-# ✔ Corrige leitura do objeto Response (NÃO é dict)
-# ✔ Remove uso incorreto de item.get
-# ✔ Extrai texto pelo atributo oficial: response.output_text
-# ✔ Mantém DEBUG TOTAL
+# MENU EB – Backend Chatbot API (FINAL ESTÁVEL + CONTEXTO FORÇADO)
+# STATUS: CORRIGIDO (SyntaxError FIX)
+#
+# ✔ Corrige f-string quebrada
+# ✔ Usa OpenAI >=1.0 corretamente (Responses API)
+# ✔ Força uso do contexto dos .txt
+# ✔ Texto 120–150 caracteres
+# ✔ DEBUG claro no Railway
 # ================================
 
 from flask import Flask, request
@@ -17,7 +19,7 @@ from openai import OpenAI
 # ================================
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-GITHUB_REPO = os.getenv("GITHUB_REPO")
+GITHUB_REPO = os.getenv("GITHUB_REPO")  # ex: Patolinotop/chatgebede
 GITHUB_BRANCH = os.getenv("GITHUB_BRANCH", "main")
 
 if not OPENAI_API_KEY or not GITHUB_REPO:
@@ -75,66 +77,46 @@ def ler_contexto():
     return contexto[:2500]
 
 # ================================
-# OpenAI (API NOVA – CORRETA)
+# OpenAI (API NOVA – FORÇANDO CONTEXTO)
 # ================================
 
 def gerar_resposta(tema: str, contexto: str):
     system_prompt = (
         "Você é um redator humano profissional e analista de documentos. "
-        "Sua tarefa é interpretar o CONTEXTO fornecido e gerar um texto coerente "
-        "baseado exclusivamente nele. "
-        "Não invente informações externas e não use conhecimento genérico da vida real. "
-        "Use linguagem formal, gramaticalmente correta e natural, como um humano escreveria."
+        "Utilize EXCLUSIVAMENTE as informações presentes no CONTEXTO fornecido. "
+        "Não invente dados externos e não use conhecimento genérico. "
+        "Escreva de forma formal, clara e gramaticalmente correta."
     )
 
     user_prompt = (
-        f"TEMA: {tema}
-
-"
-        "CONTEXTO (documentos de referência):
-"
-        f"{contexto}
-
-"
-        "INSTRUÇÕES OBRIGATÓRIAS:
-"
-        "- Use o contexto acima como base principal da resposta
-"
-        "- Não inclua informações que não possam ser inferidas do contexto
-"
-        "- Gere um único parágrafo
-"
-        "- Tamanho entre 120 e 150 caracteres
-"
-        "- Texto claro, humano, formal e bem pontuado
-"
-        "- Não mencione arquivos, documentos ou fontes"
+        f"TEMA: {tema}\n\n"
+        "CONTEXTO (documentos internos):\n"
+        f"{contexto}\n\n"
+        "INSTRUÇÕES:\n"
+        "- Baseie-se apenas no contexto acima\n"
+        "- Gere um único parágrafo\n"
+        "- Entre 120 e 150 caracteres\n"
+        "- Não mencione arquivos, fontes ou IA"
     )
 
     try:
         print("[DEBUG] Chamando OpenAI (Responses)")
-
         response = client.responses.create(
             model="gpt-4.1-mini",
             input=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            max_output_tokens=180,
+            max_output_tokens=180
         )
 
         texto = response.output_text
-
         if not texto:
             raise RuntimeError("Resposta vazia da OpenAI")
 
+        texto = texto.strip()
         print("[DEBUG] OpenAI OK | chars:", len(texto))
-        return texto.strip(), None
-
-    except Exception as e:
-        print("[DEBUG] OpenAI ERRO")
-        traceback.print_exc()
-        return None, str(e)
+        return texto, None
 
     except Exception as e:
         print("[DEBUG] OpenAI ERRO")
