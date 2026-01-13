@@ -1,15 +1,17 @@
 # ================================
-# MENU EB – Backend Chatbot API (DEBUG TOTAL + SEM FALLBACK OCULTO)
-# Objetivo:
-# - NUNCA usar fallback silencioso
-# - Logar exatamente ONDE e POR QUE falha
-# - Retornar debug controlado quando erro ocorrer
+# MENU EB – Backend Chatbot API (OPENAI >=1.0 FIX FINAL + DEBUG)
+# CORREÇÃO DEFINITIVA:
+# ✔ Remove uso de openai.ChatCompletion (DESCONTINUADO)
+# ✔ Usa API NOVA openai>=1.0 (Responses)
+# ✔ Mantém DEBUG explícito (sem fallback oculto)
+# ✔ Retorna `reply` somente quando OpenAI responder
+# ✔ Retorna `error` técnico quando falhar
 # ================================
 
 from flask import Flask, request
 import os, json, re, requests, traceback
 from dotenv import load_dotenv
-import openai
+from openai import OpenAI
 
 # ================================
 # ENV
@@ -22,7 +24,7 @@ GITHUB_BRANCH = os.getenv("GITHUB_BRANCH", "main")
 if not OPENAI_API_KEY or not GITHUB_REPO:
     raise RuntimeError("Variáveis de ambiente ausentes")
 
-openai.api_key = OPENAI_API_KEY
+client = OpenAI(api_key=OPENAI_API_KEY)
 
 # ================================
 # APP
@@ -41,7 +43,7 @@ def limpar_texto(txt: str) -> str:
     return txt.strip()
 
 # ================================
-# GitHub
+# GitHub – leitura dos .txt
 # ================================
 
 def listar_txt(path=""):
@@ -74,31 +76,47 @@ def ler_contexto():
     return contexto[:2500]
 
 # ================================
-# OpenAI
+# OpenAI (API NOVA)
 # ================================
 
 def gerar_resposta(tema: str, contexto: str):
-    system_prompt = "Redija um texto humano, formal e curto."
-    user_prompt = f"Tema: {tema}\nContexto: {contexto}\nTexto:" 
+    system_prompt = (
+        "Você é um redator humano profissional. "
+        "Escreva um texto curto, formal e gramatical. "
+        "Não use gírias. Não cite documentos."
+    )
+
+    user_prompt = (
+        f"TEMA: {tema}\n"
+        f"BASE SEMÂNTICA: {contexto}\n"
+        "Gere um único parágrafo entre 60 e 100 caracteres, frase completa."
+    )
 
     try:
-        print("[DEBUG] Chamando OpenAI")
-        resp = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",
-            messages=[
+        print("[DEBUG] Chamando OpenAI (Responses)")
+        resp = client.responses.create(
+            model="gpt-4.1-mini",
+            input=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            max_tokens=90,
-            temperature=0.35,
-            timeout=20
+            max_output_tokens=120,
         )
-        texto = resp.choices[0].message.content.strip()
+
+        # Extrai texto com segurança
+        texto = ""
+        for item in resp.output:
+            if item.get("type") == "message":
+                for c in item.get("content", []):
+                    if c.get("type") == "output_text":
+                        texto += c.get("text", "")
+
+        texto = texto.strip()
         print("[DEBUG] OpenAI OK")
         return texto, None
 
     except Exception as e:
-        print("[DEBUG] OpenAI ERRO:")
+        print("[DEBUG] OpenAI ERRO")
         traceback.print_exc()
         return None, str(e)
 
@@ -113,7 +131,7 @@ def chatbot():
 
     if not tema:
         return app.response_class(
-            response=json.dumps({"error": "Tema vazio"}, ensure_ascii=False),
+            response=json.dumps({"error": "tema_vazio"}, ensure_ascii=False),
             mimetype="application/json"
         )
 
@@ -141,7 +159,7 @@ def chatbot():
     )
 
 # ================================
-# START
+# START (Railway)
 # ================================
 
 if __name__ == "__main__":
