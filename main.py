@@ -1,29 +1,23 @@
 # ================================
-# MENU EB – Backend Chatbot (VERSÃO FINAL CORRIGIDA E HUMANIZADA)
-# Correções DEFINITIVAS:
-# ✔ Remove lixo de encoding (BOM / UTF-8 quebrado)
-# ✔ NÃO devolve texto cru dos .txt
-# ✔ Usa .txt APENAS como base semântica
-# ✔ Resposta SEMPRE curta (60–100 caracteres)
-# ✔ Texto HUMANIZADO (natural, mas formal e gramatical)
-# ✔ Nunca responde algo fora do tema
+# MENU EB – Backend Chatbot API (FINAL HUMANIZADO)
+# Objetivo:
+# - Gerar texto curto (60–100 caracteres)
+# - Humanizado, formal e gramatical
+# - Usar .txt apenas como base semântica
+# - Nunca devolver lixo de encoding ou texto gigante
 # ================================
 
 from flask import Flask, request, jsonify
-import os
-import requests
+import os, json, re, requests
 from dotenv import load_dotenv
 import openai
-import json
-import re
 
 # ================================
 # ENV
 # ================================
 load_dotenv()
-
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-GITHUB_REPO = os.getenv("GITHUB_REPO")
+GITHUB_REPO = os.getenv("GITHUB_REPO")  # ex: Patolinotop/chatgebede
 GITHUB_BRANCH = os.getenv("GITHUB_BRANCH", "main")
 
 if not OPENAI_API_KEY or not GITHUB_REPO:
@@ -38,32 +32,19 @@ app = Flask(__name__)
 app.config["JSON_AS_ASCII"] = False
 
 # ================================
-# Utils – limpeza de texto
+# Utils
 # ================================
 
 def limpar_texto(txt: str) -> str:
     if not txt:
         return ""
-
-    # Remove BOM e lixo de encoding
     txt = txt.encode("utf-8", "ignore").decode("utf-8", "ignore")
-
-    # Remove excesso de espaços e linhas vazias
-    txt = re.sub(r"\n{2,}", "\n", txt)
+    txt = re.sub(r"\n{2,}", " ", txt)
     txt = re.sub(r"\s{2,}", " ", txt)
-
-    # Remove cabeçalhos comuns (ex: documentos)
-    blacklist = [
-        "EXÉRCITO", "CAPACITAÇÃO", "PATENTE", "________________________________________________"
-    ]
-
-    for b in blacklist:
-        txt = txt.replace(b, "")
-
     return txt.strip()
 
 # ================================
-# GitHub – leitura segura dos .txt
+# GitHub – leitura dos .txt
 # ================================
 
 def listar_txt(path=""):
@@ -71,7 +52,6 @@ def listar_txt(path=""):
     r = requests.get(url, timeout=10)
     if r.status_code != 200:
         return []
-
     arquivos = []
     for item in r.json():
         if item.get("type") == "file" and item.get("name", "").endswith(".txt"):
@@ -87,40 +67,33 @@ def ler_contexto():
         try:
             r = requests.get(url, timeout=10)
             if r.status_code == 200:
-                limpo = limpar_texto(r.text)
-                if limpo:
-                    textos.append(limpo)
+                textos.append(limpar_texto(r.text))
         except Exception:
             pass
-
-    contexto = "\n".join(textos)
-    return contexto[:2500]
+    return " ".join(textos)[:2500]
 
 # ================================
-# OpenAI – geração CONTROLADA e HUMANIZADA
+# Geração de texto
 # ================================
 
 def gerar_resposta(tema: str, contexto: str) -> str:
     system_prompt = (
         "Você é um redator humano profissional. "
-        "Seu texto NÃO deve parecer escrito por IA. "
-        "Escreva de forma natural, formal e bem pontuada. "
-        "Nunca copie trechos do contexto literalmente. "
-        "Use o contexto apenas como base de conhecimento."
+        "Escreva textos naturais, formais e bem pontuados. "
+        "Não use gírias nem linguagem de IA."
     )
 
     user_prompt = f"""
 TEMA: {tema}
 
-BASE DE CONHECIMENTO:
+BASE SEMÂNTICA:
 {contexto}
 
-INSTRUÇÕES OBRIGATÓRIAS:
-- Gere UM único parágrafo
+INSTRUÇÕES:
+- Um único parágrafo
 - Entre 60 e 100 caracteres
-- Frase completa e coesa
-- Português formal
-- Não mencionar documentos, arquivos ou textos
+- Frase completa
+- Não citar documentos ou arquivos
 """
 
     try:
@@ -136,18 +109,14 @@ INSTRUÇÕES OBRIGATÓRIAS:
             frequency_penalty=0.6,
             timeout=20
         )
-
         texto = resp.choices[0].message.content.strip()
-
     except Exception:
-        texto = "O tema informado exige análise específica para gerar um texto adequado."
+        texto = f"O tema {tema} envolve aspectos relevantes que exigem clareza e organização."
 
-    # Garantia final de tamanho e completude
-    texto = texto[:120]
     if texto and texto[-1] not in ".!?":
         texto = texto.rsplit(" ", 1)[0] + "."
 
-    return texto
+    return texto[:120]
 
 # ================================
 # API
