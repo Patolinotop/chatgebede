@@ -1,13 +1,13 @@
 # ================================
-# MENU EB – Backend Chatbot API (RAG SEMÂNTICO COM EMBEDDINGS)
-# STATUS: ATUALIZADO – MENOS REPETIÇÃO + MELHOR MATCH DE CONTEXTO
+# MENU EB – Backend Chatbot API (RAG SEMÂNTICO + SÍNTESE CONTROLADA)
+# STATUS: ATUALIZADO – MENOS "NÃO TEM NAS FONTES" + MENOS REPETIÇÃO
 #
-# PRINCIPAIS MELHORIAS:
-# - Remove interseção de palavras e usa embeddings (busca semântica real)
-# - Cache do índice de embeddings (evita custo/latência por request)
-# - Se contexto vazio: não chama o modelo (evita "não descrito" confuso)
-# - Temperature ajustada para reduzir repetição sem perder controle
-# - Mantém: resposta curta, sem inventar, sem copiar frases inteiras
+# O QUE MUDA AQUI:
+# - Busca semântica via embeddings (sem interseção de palavras)
+# - Se threshold falhar, ainda usa os melhores trechos (evita contexto vazio)
+# - Prompt permite SÍNTESE: juntar fatos de trechos diferentes sem inventar
+# - Temperature ajustada pra reduzir repetição sem perder controle
+# - Cache de índice de embeddings + assinatura simples dos textos
 # ================================
 
 from flask import Flask, request
@@ -33,20 +33,20 @@ GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")  # opcional
 # Cache
 CACHE_TTL_FILES = int(os.getenv("CACHE_TTL_FILES", "300"))     # 5 min
 CACHE_TTL_TEXTS = int(os.getenv("CACHE_TTL_TEXTS", "300"))     # 5 min
-CACHE_TTL_INDEX = int(os.getenv("CACHE_TTL_INDEX", "3600"))    # 1h (embeddings)
+CACHE_TTL_INDEX = int(os.getenv("CACHE_TTL_INDEX", "3600"))    # 1h
 
-# Resposta
+# Resposta (ajuste via Railway se quiser)
 MIN_CHARS = int(os.getenv("MIN_CHARS", "120"))
 MAX_CHARS = int(os.getenv("MAX_CHARS", "160"))
 
-# Ajustes RAG
-TOP_K = int(os.getenv("TOP_K", "10"))
-MIN_SIM = float(os.getenv("MIN_SIM", "0.20"))
-CONTEXT_MAX_CHARS = int(os.getenv("CONTEXT_MAX_CHARS", "7000"))
+# RAG
+TOP_K = int(os.getenv("TOP_K", "20"))  # mais trechos = menos "vazio"
+MIN_SIM = float(os.getenv("MIN_SIM", "0.10"))  # mais permissivo
+CONTEXT_MAX_CHARS = int(os.getenv("CONTEXT_MAX_CHARS", "12000"))  # mais base -> melhor síntese
 
-# Ajustes geração
-TEMPERATURE = float(os.getenv("TEMPERATURE", "0.35"))
-MAX_OUTPUT_TOKENS = int(os.getenv("MAX_OUTPUT_TOKENS", "120"))
+# Geração
+TEMPERATURE = float(os.getenv("TEMPERATURE", "0.40"))  # reduz repetição sem virar bagunça
+MAX_OUTPUT_TOKENS = int(os.getenv("MAX_OUTPUT_TOKENS", "160"))  # um pouco mais de folga
 
 DEBUG = os.getenv("DEBUG", "0") == "1"
 
@@ -89,15 +89,18 @@ def dividir_em_trechos(texto: str, chunk_size: int = 900) -> List[str]:
     texto = limpar_texto(texto)
     if len(texto) <= chunk_size:
         return [texto]
+
     trechos = []
     i = 0
     while i < len(texto):
         j = min(i + chunk_size, len(texto))
+        # tenta cortar em ponto pra não quebrar frases
         cut = texto.rfind(".", i, j)
         if cut != -1 and cut > i + 200:
             j = cut + 1
         trechos.append(texto[i:j].strip())
         i = j
+
     return [t for t in trechos if t]
 
 def garantir_pontuacao_final(texto: str) -> str:
@@ -120,10 +123,7 @@ def resposta_parece_cortada(texto: str) -> bool:
     if re.search(r"[,;:–—-]\s*$", t):
         return True
     ultima = re.sub(r"[^\wà-ú]+$", "", t.lower()).split()[-1] if t.split() else ""
-    pendentes = {
-        "e", "ou", "para", "por", "de", "do", "da", "dos", "das", "no", "na", "nos", "nas",
-        "em", "ao", "aos", "à", "às", "com", "sem", "sobre", "entre", "que"
-    }
+    pendentes = {"e","ou","para","por","de","do","da","dos","das","no","na","nos","nas","em","ao","aos","à","às","com","sem","sobre","entre","que"}
     if ultima in pendentes:
         return True
     if t[-1] not in ".!?" and len(t) >= max(90, MIN_CHARS - 10):
@@ -132,7 +132,7 @@ def resposta_parece_cortada(texto: str) -> bool:
 
 def dentro_da_faixa(texto: str, min_c: int, max_c: int) -> bool:
     n = contar_chars(texto)
-    return (min_c <= n <= max_c)
+    return min_c <= n <= max_c
 
 # ================================
 # GitHub – leitura dos .txt (com cache)
@@ -159,11 +159,11 @@ def listar_txt(path: str = "") -> List[str]:
 
     arquivos: List[str] = []
     data = r.json()
+
     if isinstance(data, dict) and data.get("type") == "file":
-        # caso raro: path aponta direto para um arquivo
         if data.get("name", "").endswith(".txt") and data.get("download_url"):
-            arquivos.append(data["download_url"])
-        return arquivos
+            return [data["download_url"]]
+        return []
 
     for item in data:
         if item.get("type") == "file" and item.get("name", "").endswith(".txt"):
@@ -203,18 +203,15 @@ def ler_txts() -> List[str]:
 # ================================
 # Embeddings Index (cacheado)
 # ================================
-_cache_index: Dict[str, object] = {
-    "ts": 0.0,
-    "sig": "",
-    "chunks": [],     # List[str]
-    "emb": None       # np.ndarray [N, D]
-}
+_cache_index: Dict[str, object] = {"ts": 0.0, "sig": "", "chunks": [], "emb": None}
 
 def _signature_texts(textos: List[str]) -> str:
-    # assinatura leve para detectar mudança (sem guardar tudo)
+    # assinatura razoável: usa tamanho + amostras para detectar mudança sem custo alto
     h = hashlib.sha1()
     for t in textos:
-        h.update(t[:2000].encode("utf-8", "ignore"))  # amostra por arquivo
+        h.update(str(len(t)).encode("utf-8"))
+        h.update(t[:3000].encode("utf-8", "ignore"))
+        h.update(t[-1000:].encode("utf-8", "ignore"))
         h.update(b"\n---\n")
     return h.hexdigest()
 
@@ -267,7 +264,7 @@ def build_or_get_index() -> Tuple[List[str], np.ndarray]:
     _cache_index["emb"] = emb
     return chunks, emb
 
-def montar_contexto_relevante_semantico(tema: str, max_chars: int = 7000, top_k: int = 10) -> str:
+def montar_contexto_relevante_semantico(tema: str, max_chars: int, top_k: int) -> str:
     chunks, emb = build_or_get_index()
     if emb is None or emb.shape[0] == 0:
         return ""
@@ -275,9 +272,9 @@ def montar_contexto_relevante_semantico(tema: str, max_chars: int = 7000, top_k:
     qv = _embed_texts([tema])[0]
     idxs, sims = _cosine_topk(qv, emb, k=min(top_k, emb.shape[0]))
 
+    # 1) primeiro tenta filtrar por similaridade
     selecionados: List[str] = []
     total = 0
-
     for i, s in zip(idxs, sims):
         if s < MIN_SIM:
             continue
@@ -288,12 +285,24 @@ def montar_contexto_relevante_semantico(tema: str, max_chars: int = 7000, top_k:
         selecionados.append(bloco)
         total += add_len
 
+    # 2) se ficou vazio, NÃO abandona: pega top trechos mesmo assim (evita "não tem nas fontes")
+    if not selecionados:
+        log("Nenhum trecho passou MIN_SIM; usando top trechos mesmo assim.")
+        total = 0
+        for i in idxs[: min(len(idxs), max(8, top_k // 2))]:
+            bloco = chunks[i].strip()
+            add_len = len(bloco) + 8
+            if total + add_len > max_chars:
+                break
+            selecionados.append(bloco)
+            total += add_len
+
     contexto = "\n\n---\n\n".join(selecionados)
-    log("Contexto semântico chars:", len(contexto), "top sims:", sims[:5])
+    log("Contexto chars:", len(contexto), "top sims:", sims[:5])
     return contexto
 
 # ================================
-# OpenAI – geração controlada
+# OpenAI – geração controlada (com síntese)
 # ================================
 def _call_openai(system_prompt: str, user_prompt: str, max_output_tokens: int) -> str:
     resp = client.responses.create(
@@ -309,30 +318,31 @@ def _call_openai(system_prompt: str, user_prompt: str, max_output_tokens: int) -
 
 def gerar_resposta(tema: str, contexto: str) -> Tuple[Optional[str], Optional[str]]:
     """
-    1) Gera resposta curta diretamente.
-    2) Se vier fora da faixa ou "cortada", pede reescrita curta (2ª chamada).
+    1) Gera resposta curta.
+    2) Se vier fora da faixa ou truncada, pede reescrita (2ª chamada).
     """
+
+    # Aqui está o "pulo do gato": permite entender "indireto"
+    # desde que seja síntese baseada nos trechos (sem criar fatos novos).
     system_prompt = (
-        "Você é um analista de normas institucionais. "
-        "Use EXCLUSIVAMENTE as informações contidas nos DOCUMENTOS fornecidos. "
-        "É PROIBIDO completar lacunas com conhecimento externo, suposições ou práticas comuns. "
-        "Se um detalhe não estiver explícito, OMITA esse detalhe. "
-        "Reescreva com palavras próprias, sem copiar frases inteiras. "
-        "Varie a redação quando possível (sinônimos e ordem), sem mudar o conteúdo factual. "
-        "Entregue texto curto, gramaticalmente correto, natural e finalizado (sem frase cortada)."
+        "Você é um analista de normas institucionais e redator técnico. "
+        "Use SOMENTE as informações contidas nos TRECHOS fornecidos. "
+        "É PROIBIDO adicionar fatos novos, nomes, números, prazos, requisitos ou regras que não estejam suportados. "
+        "Você PODE sintetizar: combinar ideias de trechos diferentes e generalizar de forma leve quando isso for consequência direta dos trechos. "
+        "Não copie frases inteiras; reescreva com palavras próprias, português natural e gramaticalmente correto. "
+        "Entregue texto finalizado (sem frase cortada)."
     )
 
     user_prompt = (
         f"TEMA/PERGUNTA: {tema}\n\n"
-        "DOCUMENTOS (TRECHOS RELEVANTES):\n"
+        "TRECHOS DA BASE (PARA SUSTENTAR A RESPOSTA):\n"
         f"{contexto}\n\n"
         "REGRAS DE RESPOSTA (OBRIGATÓRIO):\n"
         "1) Responda APENAS sobre o tema.\n"
-        "2) Use SOMENTE o que está nos documentos (sem inferir).\n"
+        "2) Baseie tudo nos trechos; pode sintetizar, mas NÃO invente.\n"
         "3) Não copie frases inteiras; reescreva.\n"
         f"4) Produza 1 único parágrafo com {MIN_CHARS} a {MAX_CHARS} caracteres (contando espaços).\n"
         "5) Termine com ponto final.\n"
-        "6) Se o tema for amplo, foque no conceito central presente nos documentos.\n"
     )
 
     try:
@@ -346,15 +356,14 @@ def gerar_resposta(tema: str, contexto: str) -> Tuple[Optional[str], Optional[st
         if (not dentro_da_faixa(texto, MIN_CHARS, MAX_CHARS)) or resposta_parece_cortada(texto):
             rewrite_prompt = (
                 f"TEMA/PERGUNTA: {tema}\n\n"
-                "DOCUMENTOS (TRECHOS RELEVANTES):\n"
+                "TRECHOS DA BASE:\n"
                 f"{contexto}\n\n"
-                "TEXTO ATUAL (NÃO CONFIE NELE SE ESTIVER LONGO/CORTADO):\n"
+                "TEXTO ATUAL:\n"
                 f"{texto}\n\n"
                 "TAREFA:\n"
-                f"- REESCREVA para ficar ENTRE {MIN_CHARS} e {MAX_CHARS} caracteres (com espaços).\n"
-                "- Mantenha SOMENTE informações explícitas nos documentos.\n"
-                "- 1 único parágrafo, formal, objetivo e natural.\n"
-                "- Termine com ponto final.\n"
+                f"- REESCREVA para ficar ENTRE {MIN_CHARS} e {MAX_CHARS} caracteres.\n"
+                "- Mantenha o sentido baseado nos trechos.\n"
+                "- 1 parágrafo, natural, objetivo, e terminando com ponto.\n"
                 "- Não deixe frase incompleta.\n"
             )
             texto2 = _call_openai(system_prompt, rewrite_prompt, max_output_tokens=MAX_OUTPUT_TOKENS).strip()
@@ -369,21 +378,17 @@ def gerar_resposta(tema: str, contexto: str) -> Tuple[Optional[str], Optional[st
                     texto = garantir_pontuacao_final(texto)
 
         if (not dentro_da_faixa(texto, MIN_CHARS, MAX_CHARS)) or resposta_parece_cortada(texto):
-            texto = (
-                "Os documentos disponíveis não trazem informação explícita suficiente sobre o tema solicitado para afirmar regras ou detalhes adicionais."
-            )
+            texto = "Os trechos retornados não sustentam uma síntese segura sobre o tema solicitado, sem adicionar informações não suportadas."
             texto = aplicar_capitalizacao(texto)
             texto = garantir_pontuacao_final(texto)
 
             if not dentro_da_faixa(texto, MIN_CHARS, MAX_CHARS):
-                fallback_prompt = (
-                    f"Reescreva o texto a seguir para ficar ENTRE {MIN_CHARS} e {MAX_CHARS} caracteres (com espaços), "
-                    "1 parágrafo formal, natural e terminando com ponto:\n"
-                    f"{texto}"
+                fb_prompt = (
+                    f"Reescreva para ficar ENTRE {MIN_CHARS} e {MAX_CHARS} caracteres, 1 parágrafo, natural e com ponto:\n{texto}"
                 )
                 texto_fb = _call_openai(
-                    "Você é um redator técnico. Mantenha o sentido, sem adicionar fatos novos.",
-                    fallback_prompt,
+                    "Você é um redator técnico. Mantenha o sentido sem adicionar fatos.",
+                    fb_prompt,
                     max_output_tokens=MAX_OUTPUT_TOKENS
                 ).strip()
                 if texto_fb:
@@ -411,15 +416,16 @@ def chatbot():
             mimetype="application/json"
         )
 
-    # Contexto semântico (embeddings)
-    contexto = montar_contexto_relevante_semantico(tema, max_chars=CONTEXT_MAX_CHARS, top_k=TOP_K)
+    contexto = montar_contexto_relevante_semantico(
+        tema,
+        max_chars=CONTEXT_MAX_CHARS,
+        top_k=TOP_K
+    )
 
-    # Se não há base, não chama o modelo (evita negar de forma "errada")
+    # Se por algum motivo vier totalmente vazio, retorna algo claro (sem chamar modelo)
     if not contexto.strip():
         return app.response_class(
-            response=json.dumps({
-                "reply": "Não há trechos suficientes nas fontes para responder com segurança sobre esse tema."
-            }, ensure_ascii=False),
+            response=json.dumps({"reply": "Não foi possível recuperar trechos da base para sustentar a resposta."}, ensure_ascii=False),
             mimetype="application/json"
         )
 
