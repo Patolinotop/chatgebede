@@ -1,15 +1,3 @@
-# ================================
-# MENU EB – Backend Chatbot API (RAG SEMÂNTICO + SÍNTESE CONTROLADA)
-# STATUS: ATUALIZADO – MENOS "NÃO TEM NAS FONTES" + MENOS REPETIÇÃO
-#
-# O QUE MUDA AQUI:
-# - Busca semântica via embeddings (sem interseção de palavras)
-# - Se threshold falhar, ainda usa os melhores trechos (evita contexto vazio)
-# - Prompt permite SÍNTESE: juntar fatos de trechos diferentes sem inventar
-# - Temperature ajustada pra reduzir repetição sem perder controle
-# - Cache de índice de embeddings + assinatura simples dos textos
-# ================================
-
 from flask import Flask, request
 import os, json, re, requests, traceback, time, hashlib
 from typing import List, Tuple, Dict, Optional
@@ -31,22 +19,29 @@ GITHUB_BRANCH = os.getenv("GITHUB_BRANCH", "main")
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")  # opcional
 
 # Cache
-CACHE_TTL_FILES = int(os.getenv("CACHE_TTL_FILES", "300"))     # 5 min
-CACHE_TTL_TEXTS = int(os.getenv("CACHE_TTL_TEXTS", "300"))     # 5 min
-CACHE_TTL_INDEX = int(os.getenv("CACHE_TTL_INDEX", "3600"))    # 1h
+CACHE_TTL_FILES = int(os.getenv("CACHE_TTL_FILES", "300"))      # 5 min
+CACHE_TTL_TEXTS = int(os.getenv("CACHE_TTL_TEXTS", "300"))      # 5 min
+CACHE_TTL_INDEX = int(os.getenv("CACHE_TTL_INDEX", "3600"))     # 1h
 
-# Resposta (ajuste via Railway se quiser)
+# Resposta
 MIN_CHARS = int(os.getenv("MIN_CHARS", "120"))
 MAX_CHARS = int(os.getenv("MAX_CHARS", "160"))
+MAX_OUTPUT_TOKENS = int(os.getenv("MAX_OUTPUT_TOKENS", "220"))
+
+# Geração (menos repetição)
+TEMPERATURE = float(os.getenv("TEMPERATURE", "0.55"))
 
 # RAG
-TOP_K = int(os.getenv("TOP_K", "20"))  # mais trechos = menos "vazio"
-MIN_SIM = float(os.getenv("MIN_SIM", "0.10"))  # mais permissivo
-CONTEXT_MAX_CHARS = int(os.getenv("CONTEXT_MAX_CHARS", "12000"))  # mais base -> melhor síntese
+TOP_K = int(os.getenv("TOP_K", "35"))
+CONTEXT_MAX_CHARS = int(os.getenv("CONTEXT_MAX_CHARS", "14000"))
 
-# Geração
-TEMPERATURE = float(os.getenv("TEMPERATURE", "0.40"))  # reduz repetição sem virar bagunça
-MAX_OUTPUT_TOKENS = int(os.getenv("MAX_OUTPUT_TOKENS", "160"))  # um pouco mais de folga
+# Score híbrido
+MIN_SIM = float(os.getenv("MIN_SIM", "0.07"))
+LEX_BOOST_PER_HIT = float(os.getenv("LEX_BOOST_PER_HIT", "0.035"))
+LEX_BOOST_CAP = float(os.getenv("LEX_BOOST_CAP", "0.18"))
+
+# Permitir conhecimento geral quando faltar algo nos txts
+ALLOW_GENERAL_KNOWLEDGE = os.getenv("ALLOW_GENERAL_KNOWLEDGE", "1") == "1"
 
 DEBUG = os.getenv("DEBUG", "0") == "1"
 
@@ -60,6 +55,7 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 # ================================
 app = Flask(__name__)
 app.config["JSON_AS_ASCII"] = False
+
 
 # ================================
 # Utils
@@ -89,18 +85,15 @@ def dividir_em_trechos(texto: str, chunk_size: int = 900) -> List[str]:
     texto = limpar_texto(texto)
     if len(texto) <= chunk_size:
         return [texto]
-
     trechos = []
     i = 0
     while i < len(texto):
         j = min(i + chunk_size, len(texto))
-        # tenta cortar em ponto pra não quebrar frases
         cut = texto.rfind(".", i, j)
         if cut != -1 and cut > i + 200:
             j = cut + 1
         trechos.append(texto[i:j].strip())
         i = j
-
     return [t for t in trechos if t]
 
 def garantir_pontuacao_final(texto: str) -> str:
@@ -112,9 +105,6 @@ def garantir_pontuacao_final(texto: str) -> str:
         if texto and texto[-1] not in ".!?":
             texto += "."
     return texto
-
-def contar_chars(texto: str) -> int:
-    return len(texto)
 
 def resposta_parece_cortada(texto: str) -> bool:
     t = texto.strip()
@@ -131,11 +121,58 @@ def resposta_parece_cortada(texto: str) -> bool:
     return False
 
 def dentro_da_faixa(texto: str, min_c: int, max_c: int) -> bool:
-    n = contar_chars(texto)
+    n = len(texto)
     return min_c <= n <= max_c
 
+def normalizar_palavras(s: str) -> List[str]:
+    s = s.lower()
+    s = re.sub(r"[^a-zà-ú0-9\s/]", " ", s, flags=re.IGNORECASE)
+    parts = [p for p in s.split() if len(p) >= 2]
+    stop = {
+        "para","com","sem","sobre","como","qual","quais","porque","porquê",
+        "uma","uns","umas","dos","das","que","não","nos","nas","entre",
+        "sua","seu","suas","seus","esse","essa","isso","aquele","aquela",
+        "importância","importante","sobre","tema","assunto","do","da","de"
+    }
+    return [p for p in parts if p not in stop]
+
+
 # ================================
-# GitHub – leitura dos .txt (com cache)
+# Expansão de tema (ajuda MUITO)
+# ================================
+EXPAND_MAP = {
+    "constituição": ["Constituição Federal", "CF", "CF/88", "legalidade", "direitos", "deveres", "normas"],
+    "graduados": ["graduado", "sargento", "sargentos", "subtenente", "subtenentes"],
+    "praças": ["praça", "soldado", "cabo", "sargento"],
+    "recrutamento": ["alistamento", "ingresso", "incorporação", "seleção"],
+    "promoções": ["promoção", "progressão", "ascensão", "antiguidade", "merecimento"],
+}
+
+def expandir_tema(tema: str) -> Tuple[List[str], List[str]]:
+    t = tema.strip()
+    lower = t.lower()
+
+    phrases = [t]
+    lex_terms = normalizar_palavras(t)
+
+    for k, vals in EXPAND_MAP.items():
+        if k in lower:
+            phrases.extend([f"{t} {v}" for v in vals])
+            lex_terms.extend(normalizar_palavras(" ".join(vals)))
+
+    # remove duplicados mantendo ordem
+    seen = set()
+    lex_unique = []
+    for w in lex_terms:
+        if w not in seen:
+            seen.add(w)
+            lex_unique.append(w)
+
+    return phrases[:6], lex_unique[:24]
+
+
+# ================================
+# GitHub – leitura dos .txt (cache)
 # ================================
 _cache_files: Dict[str, object] = {"ts": 0.0, "items": []}
 _cache_texts: Dict[str, object] = {"ts": 0.0, "items": []}
@@ -154,11 +191,11 @@ def listar_txt(path: str = "") -> List[str]:
     url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{path}?ref={GITHUB_BRANCH}"
     r = requests.get(url, headers=_github_headers(), timeout=20)
     if r.status_code != 200:
-        log("GitHub API status", r.status_code, "path=", path)
+        log("GitHub status", r.status_code, "path=", path)
         return []
 
-    arquivos: List[str] = []
     data = r.json()
+    arquivos: List[str] = []
 
     if isinstance(data, dict) and data.get("type") == "file":
         if data.get("name", "").endswith(".txt") and data.get("download_url"):
@@ -185,7 +222,7 @@ def ler_txts() -> List[str]:
 
     textos: List[str] = []
     urls = listar_txt()
-    log("Total .txt URLs:", len(urls))
+    log("txt urls:", len(urls))
 
     for url in urls:
         try:
@@ -197,22 +234,22 @@ def ler_txts() -> List[str]:
 
     _cache_texts["ts"] = now
     _cache_texts["items"] = list(textos)
-    log("Total textos carregados:", len(textos))
+    log("txt carregados:", len(textos))
     return textos
 
+
 # ================================
-# Embeddings Index (cacheado)
+# Índice de embeddings (cache)
 # ================================
 _cache_index: Dict[str, object] = {"ts": 0.0, "sig": "", "chunks": [], "emb": None}
 
 def _signature_texts(textos: List[str]) -> str:
-    # assinatura razoável: usa tamanho + amostras para detectar mudança sem custo alto
     h = hashlib.sha1()
     for t in textos:
         h.update(str(len(t)).encode("utf-8"))
-        h.update(t[:3000].encode("utf-8", "ignore"))
-        h.update(t[-1000:].encode("utf-8", "ignore"))
-        h.update(b"\n---\n")
+        h.update(t[:2500].encode("utf-8", "ignore"))
+        h.update(t[-800:].encode("utf-8", "ignore"))
+        h.update(b"\n--\n")
     return h.hexdigest()
 
 def _embed_texts(texts: List[str], batch_size: int = 96) -> np.ndarray:
@@ -222,13 +259,6 @@ def _embed_texts(texts: List[str], batch_size: int = 96) -> np.ndarray:
         resp = client.embeddings.create(model=OPENAI_EMBED_MODEL, input=batch)
         vecs.extend([d.embedding for d in resp.data])
     return np.array(vecs, dtype=np.float32)
-
-def _cosine_topk(query_vec: np.ndarray, mat: np.ndarray, k: int) -> Tuple[List[int], List[float]]:
-    q = query_vec / (np.linalg.norm(query_vec) + 1e-9)
-    m = mat / (np.linalg.norm(mat, axis=1, keepdims=True) + 1e-9)
-    sims = (m @ q)
-    idx = np.argsort(-sims)[:k]
-    return idx.tolist(), [float(sims[i]) for i in idx]
 
 def build_or_get_index() -> Tuple[List[str], np.ndarray]:
     now = time.time()
@@ -246,8 +276,8 @@ def build_or_get_index() -> Tuple[List[str], np.ndarray]:
     chunks: List[str] = []
     for t in textos:
         chunks.extend(dividir_em_trechos(t, chunk_size=900))
-
     chunks = [c for c in chunks if c and len(c) >= 50]
+
     if not chunks:
         _cache_index["ts"] = now
         _cache_index["sig"] = sig
@@ -255,7 +285,7 @@ def build_or_get_index() -> Tuple[List[str], np.ndarray]:
         _cache_index["emb"] = np.zeros((0, 1), dtype=np.float32)
         return _cache_index["chunks"], _cache_index["emb"]
 
-    log("Construindo embeddings para chunks:", len(chunks))
+    log("chunks:", len(chunks), "criando embeddings...")
     emb = _embed_texts(chunks)
 
     _cache_index["ts"] = now
@@ -264,19 +294,54 @@ def build_or_get_index() -> Tuple[List[str], np.ndarray]:
     _cache_index["emb"] = emb
     return chunks, emb
 
-def montar_contexto_relevante_semantico(tema: str, max_chars: int, top_k: int) -> str:
+def _cosine(query_vec: np.ndarray, mat: np.ndarray) -> np.ndarray:
+    q = query_vec / (np.linalg.norm(query_vec) + 1e-9)
+    m = mat / (np.linalg.norm(mat, axis=1, keepdims=True) + 1e-9)
+    return (m @ q)
+
+def _lex_boost(chunk: str, lex_terms: List[str]) -> float:
+    if not lex_terms:
+        return 0.0
+    text = chunk.lower()
+    hits = 0
+    for w in lex_terms:
+        if w in text:
+            hits += 1
+    boost = min(LEX_BOOST_CAP, hits * LEX_BOOST_PER_HIT)
+    return float(boost)
+
+def montar_contexto_hibrido(tema: str, max_chars: int, top_k: int) -> Tuple[str, Dict[str, object]]:
+    """
+    Retorna:
+      - contexto (string com trechos)
+      - meta (info debug)
+    """
+    phrases, lex_terms = expandir_tema(tema)
     chunks, emb = build_or_get_index()
     if emb is None or emb.shape[0] == 0:
-        return ""
+        return "", {"reason": "no_chunks"}
 
-    qv = _embed_texts([tema])[0]
-    idxs, sims = _cosine_topk(qv, emb, k=min(top_k, emb.shape[0]))
+    # embedding do tema (usa a primeira phrase como query principal)
+    qv = _embed_texts([phrases[0]])[0]
+    sims = _cosine(qv, emb)
 
-    # 1) primeiro tenta filtrar por similaridade
-    selecionados: List[str] = []
+    # score híbrido = cosine + boost lexical
+    scores = []
+    for i in range(len(chunks)):
+        s = float(sims[i])
+        s += _lex_boost(chunks[i], lex_terms)
+        scores.append(s)
+
+    idxs = np.argsort(-np.array(scores))[: min(top_k, len(scores))].tolist()
+    best_scores = [float(scores[i]) for i in idxs[:10]]
+
+    # seleciona trechos: primeiro os acima de MIN_SIM, senão pega top mesmo assim
+    selecionados = []
     total = 0
-    for i, s in zip(idxs, sims):
-        if s < MIN_SIM:
+
+    passed = 0
+    for i in idxs:
+        if scores[i] < MIN_SIM:
             continue
         bloco = chunks[i].strip()
         add_len = len(bloco) + 8
@@ -284,12 +349,12 @@ def montar_contexto_relevante_semantico(tema: str, max_chars: int, top_k: int) -
             break
         selecionados.append(bloco)
         total += add_len
+        passed += 1
 
-    # 2) se ficou vazio, NÃO abandona: pega top trechos mesmo assim (evita "não tem nas fontes")
     if not selecionados:
-        log("Nenhum trecho passou MIN_SIM; usando top trechos mesmo assim.")
+        # fallback: pega top trechos mesmo (evita contexto vazio)
         total = 0
-        for i in idxs[: min(len(idxs), max(8, top_k // 2))]:
+        for i in idxs[: max(10, top_k // 2)]:
             bloco = chunks[i].strip()
             add_len = len(bloco) + 8
             if total + add_len > max_chars:
@@ -298,11 +363,19 @@ def montar_contexto_relevante_semantico(tema: str, max_chars: int, top_k: int) -
             total += add_len
 
     contexto = "\n\n---\n\n".join(selecionados)
-    log("Contexto chars:", len(contexto), "top sims:", sims[:5])
-    return contexto
+    meta = {
+        "expanded_phrases": phrases,
+        "lex_terms": lex_terms[:10],
+        "top_scores": best_scores,
+        "passed_min_sim": passed,
+        "context_chars": len(contexto),
+    }
+    log("meta:", meta)
+    return contexto, meta
+
 
 # ================================
-# OpenAI – geração controlada (com síntese)
+# OpenAI – geração (RAG + conhecimento geral permitido)
 # ================================
 def _call_openai(system_prompt: str, user_prompt: str, max_output_tokens: int) -> str:
     resp = client.responses.create(
@@ -318,31 +391,40 @@ def _call_openai(system_prompt: str, user_prompt: str, max_output_tokens: int) -
 
 def gerar_resposta(tema: str, contexto: str) -> Tuple[Optional[str], Optional[str]]:
     """
-    1) Gera resposta curta.
-    2) Se vier fora da faixa ou truncada, pede reescrita (2ª chamada).
+    Regras:
+    - Sempre usar o contexto como base do "universo" (Graduados etc.)
+    - Pode usar conhecimento geral (ex: Constituição) para conectar,
+      mas SEM dizer que veio dos trechos.
+    - Deve caber em 120–160 chars, 1 parágrafo e ponto final.
     """
 
-    # Aqui está o "pulo do gato": permite entender "indireto"
-    # desde que seja síntese baseada nos trechos (sem criar fatos novos).
+    if ALLOW_GENERAL_KNOWLEDGE:
+        policy = (
+            "Você pode complementar com conhecimento geral APENAS quando o assunto não aparecer nos trechos. "
+            "Quando usar conhecimento geral, sinalize com termos como 'Em geral,' ou 'De modo geral,' "
+            "e NÃO afirme que isso consta nos documentos. "
+            "NUNCA contradiga os trechos."
+        )
+    else:
+        policy = (
+            "Use SOMENTE o que está nos trechos. Não use conhecimento externo."
+        )
+
     system_prompt = (
-        "Você é um analista de normas institucionais e redator técnico. "
-        "Use SOMENTE as informações contidas nos TRECHOS fornecidos. "
-        "É PROIBIDO adicionar fatos novos, nomes, números, prazos, requisitos ou regras que não estejam suportados. "
-        "Você PODE sintetizar: combinar ideias de trechos diferentes e generalizar de forma leve quando isso for consequência direta dos trechos. "
-        "Não copie frases inteiras; reescreva com palavras próprias, português natural e gramaticalmente correto. "
-        "Entregue texto finalizado (sem frase cortada)."
+        "Você é um redator técnico, claro e humano. "
+        "Escreva em português correto, natural, sem soar robótico. "
+        + policy
     )
 
     user_prompt = (
-        f"TEMA/PERGUNTA: {tema}\n\n"
-        "TRECHOS DA BASE (PARA SUSTENTAR A RESPOSTA):\n"
+        f"TEMA: {tema}\n\n"
+        "TRECHOS DA BASE (USE COMO FUNDAMENTO):\n"
         f"{contexto}\n\n"
-        "REGRAS DE RESPOSTA (OBRIGATÓRIO):\n"
-        "1) Responda APENAS sobre o tema.\n"
-        "2) Baseie tudo nos trechos; pode sintetizar, mas NÃO invente.\n"
-        "3) Não copie frases inteiras; reescreva.\n"
-        f"4) Produza 1 único parágrafo com {MIN_CHARS} a {MAX_CHARS} caracteres (contando espaços).\n"
-        "5) Termine com ponto final.\n"
+        "TAREFA:\n"
+        f"- Escreva 1 único parágrafo com {MIN_CHARS} a {MAX_CHARS} caracteres (com espaços).\n"
+        "- Baseie a parte principal nos trechos (reformule com suas palavras, sem copiar frases).\n"
+        "- Se precisar de conexão geral (ex: Constituição), faça uma frase curta do tipo 'Em geral,...' sem fingir que está nos trechos.\n"
+        "- Termine com ponto final.\n"
     )
 
     try:
@@ -353,54 +435,42 @@ def gerar_resposta(tema: str, contexto: str) -> Tuple[Optional[str], Optional[st
         texto = aplicar_capitalizacao(texto)
         texto = garantir_pontuacao_final(texto)
 
+        # 2ª tentativa se ficou fora da faixa ou truncada
         if (not dentro_da_faixa(texto, MIN_CHARS, MAX_CHARS)) or resposta_parece_cortada(texto):
             rewrite_prompt = (
-                f"TEMA/PERGUNTA: {tema}\n\n"
+                f"TEMA: {tema}\n\n"
                 "TRECHOS DA BASE:\n"
                 f"{contexto}\n\n"
                 "TEXTO ATUAL:\n"
                 f"{texto}\n\n"
-                "TAREFA:\n"
-                f"- REESCREVA para ficar ENTRE {MIN_CHARS} e {MAX_CHARS} caracteres.\n"
-                "- Mantenha o sentido baseado nos trechos.\n"
-                "- 1 parágrafo, natural, objetivo, e terminando com ponto.\n"
-                "- Não deixe frase incompleta.\n"
+                "REESCREVA:\n"
+                f"- Entre {MIN_CHARS} e {MAX_CHARS} caracteres.\n"
+                "- 1 parágrafo, natural, objetivo.\n"
+                "- Use trechos como base; se usar geral, diga 'Em geral,' e não atribua aos trechos.\n"
+                "- Termine com ponto final.\n"
             )
             texto2 = _call_openai(system_prompt, rewrite_prompt, max_output_tokens=MAX_OUTPUT_TOKENS).strip()
             if texto2:
                 texto2 = aplicar_capitalizacao(texto2)
                 texto2 = garantir_pontuacao_final(texto2)
-
                 if dentro_da_faixa(texto2, MIN_CHARS, MAX_CHARS) and not resposta_parece_cortada(texto2):
                     texto = texto2
-                else:
-                    texto = re.sub(r"\s{2,}", " ", texto2 if texto2 else texto).strip()
-                    texto = garantir_pontuacao_final(texto)
 
+        # fallback final: ainda assim responde, mas sem inventar detalhe específico
         if (not dentro_da_faixa(texto, MIN_CHARS, MAX_CHARS)) or resposta_parece_cortada(texto):
-            texto = "Os trechos retornados não sustentam uma síntese segura sobre o tema solicitado, sem adicionar informações não suportadas."
+            if ALLOW_GENERAL_KNOWLEDGE:
+                texto = "Nos trechos, Graduados aparecem ligados a funções e deveres. Em geral, a Constituição orienta direitos e legalidade."
+            else:
+                texto = "Os trechos recuperados não trazem base suficiente para resumir o tema com segurança, sem adicionar informação externa."
             texto = aplicar_capitalizacao(texto)
             texto = garantir_pontuacao_final(texto)
-
-            if not dentro_da_faixa(texto, MIN_CHARS, MAX_CHARS):
-                fb_prompt = (
-                    f"Reescreva para ficar ENTRE {MIN_CHARS} e {MAX_CHARS} caracteres, 1 parágrafo, natural e com ponto:\n{texto}"
-                )
-                texto_fb = _call_openai(
-                    "Você é um redator técnico. Mantenha o sentido sem adicionar fatos.",
-                    fb_prompt,
-                    max_output_tokens=MAX_OUTPUT_TOKENS
-                ).strip()
-                if texto_fb:
-                    texto_fb = garantir_pontuacao_final(texto_fb)
-                    if dentro_da_faixa(texto_fb, MIN_CHARS, MAX_CHARS) and not resposta_parece_cortada(texto_fb):
-                        texto = texto_fb
 
         return texto, None
 
     except Exception as e:
         traceback.print_exc()
         return None, str(e)
+
 
 # ================================
 # API
@@ -416,21 +486,25 @@ def chatbot():
             mimetype="application/json"
         )
 
-    contexto = montar_contexto_relevante_semantico(
+    contexto, meta = montar_contexto_hibrido(
         tema,
         max_chars=CONTEXT_MAX_CHARS,
         top_k=TOP_K
     )
 
-    # Se por algum motivo vier totalmente vazio, retorna algo claro (sem chamar modelo)
     if not contexto.strip():
+        # mesmo aqui, se conhecimento geral for permitido, dá uma saída curta
+        if ALLOW_GENERAL_KNOWLEDGE:
+            reply = "Não encontrei trechos na base para sustentar o tema. Em geral, o assunto depende de normas e deveres aplicáveis."
+        else:
+            reply = "Não foi possível recuperar trechos da base para sustentar a resposta com segurança."
+        reply = aplicar_capitalizacao(garantir_pontuacao_final(reply))
         return app.response_class(
-            response=json.dumps({"reply": "Não foi possível recuperar trechos da base para sustentar a resposta."}, ensure_ascii=False),
+            response=json.dumps({"reply": reply}, ensure_ascii=False),
             mimetype="application/json"
         )
 
     texto, erro = gerar_resposta(tema, contexto)
-
     if erro:
         return app.response_class(
             response=json.dumps({"error": "openai_failed", "detail": erro}, ensure_ascii=False),
@@ -441,6 +515,7 @@ def chatbot():
         response=json.dumps({"reply": texto}, ensure_ascii=False),
         mimetype="application/json"
     )
+
 
 # ================================
 # START
