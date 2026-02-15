@@ -85,13 +85,22 @@ def strip_bot_mention(text: str) -> str:
     return t.strip()
 
 def strip_self_mentions(text: str) -> str:
-    """Remove qualquer menção ao próprio bot que a IA possa ter cuspido."""
+    """Remove menção ao próprio bot e também remove vocativo com nome do bot no início."""
+    t = (text or "").strip()
     if not bot.user:
-        return (text or "").strip()
-    t = (text or "")
-    t = re.sub(rf"<@!?{bot.user.id}>", "", t)
+        return t
+
+    # remove menções <@id> e <@!id>
+    t = re.sub(rf"<@!?{bot.user.id}>", "", t).strip()
+
+    # remove vocativo com o nome do bot no começo: "Editi," "Editi:" etc
+    bot_name = (bot.user.name or "").strip()
+    if bot_name:
+        t = re.sub(rf"^\s*{re.escape(bot_name)}\s*[,:\-]\s*", "", t, flags=re.IGNORECASE)
+
     t = re.sub(r"\s{2,}", " ", t).strip()
     return t
+
 
 async def apply_timeout(member: discord.Member, minutes: int, reason: str):
     until = discord.utils.utcnow() + timedelta(minutes=minutes)
