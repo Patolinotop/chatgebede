@@ -20,9 +20,9 @@ OPENAI_TIMEOUT_SEC = float(os.getenv("OPENAI_TIMEOUT_SEC", "25"))
 ADMIN_NAMES = [x.strip().lower() for x in (os.getenv("ADMIN_NAMES", "")).split(",") if x.strip()]
 
 # thresholds
-EMOJI_FLOOD_SINGLE = int(os.getenv("EMOJI_FLOOD_SINGLE", "7"))      # ✅ mínimo 7 na mesma mensagem
-EMOJI_FLOOD_WINDOW = int(os.getenv("EMOJI_FLOOD_WINDOW", "15"))     # soma das últimas 5 (fica)
-REPEAT_SPAM_COUNT = int(os.getenv("REPEAT_SPAM_COUNT", "3"))        # 3 repetições
+EMOJI_FLOOD_SINGLE = int(os.getenv("EMOJI_FLOOD_SINGLE", "7"))      # mínimo 7 na mesma mensagem
+EMOJI_FLOOD_WINDOW = int(os.getenv("EMOJI_FLOOD_WINDOW", "15"))
+REPEAT_SPAM_COUNT = int(os.getenv("REPEAT_SPAM_COUNT", "3"))
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -93,10 +93,6 @@ async def apply_timeout(member: discord.Member, minutes: int, reason: str):
     await member.edit(communication_disabled_until=until, reason=reason)
 
 def is_currently_muted(member: discord.Member) -> bool:
-    """
-    Discord timeout ativo:
-    communication_disabled_until > agora
-    """
     until = getattr(member, "communication_disabled_until", None)
     if not until:
         return False
@@ -106,7 +102,6 @@ def is_currently_muted(member: discord.Member) -> bool:
     except Exception:
         return False
 
-# ---------- canal estrito + estilo ----------
 RELAXED_CHANNEL_KEYWORDS = {"geral", "chat", "bate-papo", "batepapo", "conversa"}
 STRICT_CHANNEL_KEYWORDS = {
     "militar", "graduad", "avisos", "anuncio", "anúncio", "regras", "midia", "mídia",
@@ -162,7 +157,6 @@ def compute_style_flags(text: str) -> Dict[str, bool]:
         "punctuation": bad_punctuation(text),
     }
 
-# ---------- spam / flood ----------
 def normalize_for_repeat(s: str) -> str:
     s = (s or "").strip().lower()
     s = re.sub(r"\s+", " ", s)
@@ -192,7 +186,7 @@ def compute_spam_flags(current: str, last_msgs: List[str]) -> Dict[str, bool]:
     e_window = emoji_window_count(current, last_msgs)
     return {
         "repeat_spam": rep >= REPEAT_SPAM_COUNT,
-        "emoji_flood_single": e_single >= EMOJI_FLOOD_SINGLE,   # ✅ agora 7+
+        "emoji_flood_single": e_single >= EMOJI_FLOOD_SINGLE,
         "emoji_flood_window": e_window >= EMOJI_FLOOD_WINDOW,
         "repeat_count": rep,
         "emoji_single": e_single,
@@ -217,7 +211,6 @@ async def try_delete_message(msg: Optional[discord.Message], channel: discord.Te
         _log("Erro desconhecido ao deletar mensagem:")
         traceback.print_exc()
 
-# ---------- handler ----------
 async def _handle_message(message: discord.Message):
     if not isinstance(message.channel, discord.TextChannel):
         return
@@ -254,12 +247,14 @@ async def _handle_message(message: discord.Message):
                     replied_user = replied_msg_obj.author
                 replied_text = (replied_msg_obj.content or "").strip()
 
-            # author text
-            author_text = strip_bot_mention(message.content or "")
+            raw_after_strip = strip_bot_mention(message.content or "")
+            author_text = raw_after_strip
             _log(f"Texto limpo: {author_text!r}")
 
-            # se só menção e reply existe -> comando implícito
+            # ✅ novo: flag de reply implícito
+            implicit_reply = False
             if not author_text and replied_text:
+                implicit_reply = True
                 author_text = "Analise a mensagem respondida."
                 _log("Texto vazio após menção; usando comando implícito de análise do reply.")
 
@@ -267,7 +262,7 @@ async def _handle_message(message: discord.Message):
                 _log("Sem texto após remover mention.")
                 return
 
-            style_flags = compute_style_flags(author_text)
+            style_flags = compute_style_flags(raw_after_strip if raw_after_strip else author_text)
             _log(f"Style flags: {style_flags}")
 
             last5_author = await last_n_messages_from(message.channel, author.id, 5)
@@ -277,7 +272,7 @@ async def _handle_message(message: discord.Message):
 
             _log(f"Hist autor(5): {len(last5_author)} | outro(5): {len(last5_other)}")
 
-            spam_flags = compute_spam_flags(author_text, last5_author)
+            spam_flags = compute_spam_flags(raw_after_strip if raw_after_strip else author_text, last5_author)
             _log(f"Spam flags: {spam_flags}")
 
             _log("Iniciando RAG...")
@@ -290,6 +285,9 @@ async def _handle_message(message: discord.Message):
 
             admin_author = is_admin_by_name(author) or author.guild_permissions.administrator
             _log(f"admin_author={admin_author}")
+
+            author_mention = f"<@{author.id}>"
+            replied_mention = f"<@{replied_user.id}>" if replied_user else ""
 
             _log("Iniciando decide_action (OpenAI)...")
             action = await asyncio.wait_for(
@@ -310,24 +308,26 @@ async def _handle_message(message: discord.Message):
                     strict,
                     style_flags,
                     spam_flags,
+                    # novos campos
+                    implicit_reply,
+                    raw_after_strip,
+                    author_mention,
+                    replied_mention,
                 ),
                 timeout=OPENAI_TIMEOUT_SEC
             )
             _log(f"Ação: {action}")
 
             if action["mode"] == "mute":
-                # define o alvo do mute
                 target = author
-                offender_msg = message  # se o infrator é o autor, apaga a mensagem atual
+                offender_msg = message
 
                 if action.get("target") == "replied_user" and replied_user:
                     target = replied_user
-                    offender_msg = replied_msg_obj  # ✅ apaga a mensagem do infrator (a respondida)
+                    offender_msg = replied_msg_obj
 
-                # ✅ sempre tenta deletar a mensagem do infrator
                 await try_delete_message(offender_msg, message.channel)
 
-                # ✅ se já está mutado, não aplica outro
                 if is_currently_muted(target):
                     await message.channel.send("Este usuario(a) já está mutado(a).")
                     _log("Alvo já estava mutado, não aplicou novo timeout.")
