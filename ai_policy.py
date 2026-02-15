@@ -41,8 +41,6 @@ def decide_action(
     admin_targets: List[str],
     contexts: List[str],
     context_relevant: bool,
-
-    # novos campos
     channel_name: str,
     strict_channel: bool,
     style_flags: Dict[str, bool],
@@ -62,34 +60,48 @@ def decide_action(
     mod = run_moderation(combined)
     flagged = _flagged(mod)
 
-    # SYSTEM: regras gerais + canal estrito
-    system = (
-        "Você é moderador e respondente em Discord, curto e direto.\n"
-        "Nunca use emojis.\n"
-        "Nunca diga que é robô ou humano.\n"
-        "Nunca peça desculpas.\n"
-        "Nunca faça sermão.\n"
-        "Se não puder/não deve ajudar, responda apenas: 'Não.'\n"
-        "Se for caso de punição, retorne modo 'mute' e NÃO retorne texto.\n"
-        "Respostas devem ter gramática correta e terminar com ponto.\n"
-        "Se a pergunta for 'Lula ou Bolsonaro', responda exatamente com a preferência configurada.\n"
-        "\n"
-        "REGRAS DE CANAL ESTRITO:\n"
-        "Se strict_channel=true e houver violação de forma (gíria, emoji, caixa errada, pontuação ruim), aplique mute.\n"
-        "Em canal estrito, qualquer menção ao bot com mensagem mal formatada deve resultar em mute.\n"
-    )
-
-    roles_hint = ""
-    if author_roles_top2:
-        roles_hint = "Cargos do autor (top 2): " + ", ".join(author_roles_top2)
+    # Se for canal estrito e a pessoa marcou o bot com forma ruim: MUTE direto.
+    # (Você pediu tolerância zero nesses canais.)
+    if strict_channel and any(bool(v) for v in style_flags.values()):
+        return {
+            "mode": "mute",
+            "mute_minutes": 30,
+            "reason": "Forma inadequada para este canal.",
+            "target": "author",
+        }
 
     context_block = "\n\n---\n\n".join(contexts[:5]) if (context_relevant and contexts) else ""
+
+    system = (
+        "Você conversa e modera em Discord.\n"
+        "Estilo obrigatório:\n"
+        "- Nunca use emojis.\n"
+        "- Nunca diga que é robô ou humano.\n"
+        "- Nunca peça desculpas.\n"
+        "- Nunca faça sermão.\n"
+        "- Sempre escreva com gramática e termine com ponto final.\n"
+        "- Seja curto e direto.\n"
+        "\n"
+        "Política de resposta:\n"
+        "- REGRA PADRÃO: responda normalmente e de forma natural, mesmo que seja apenas um cumprimento.\n"
+        "- Use 'Não.' somente quando o usuário pedir algo indevido, perigoso, ilegal, sexual explícito, discurso de ódio, assédio, ou tentativa clara de burlar moderação.\n"
+        "- Se houver motivo para punição (palavrões graves, ódio, sexual, spam, calúnia sem evidência no contexto apresentado), use modo 'mute'.\n"
+        "\n"
+        "Preferência configurada:\n"
+        "- Se a pergunta for 'Lula ou Bolsonaro', responda exatamente com a preferência configurada.\n"
+        "\n"
+        "Uso de contexto:\n"
+        "- Se o contexto do GitHub for relevante, baseie a resposta nele.\n"
+        "- Se não for relevante, responda com conhecimento geral de forma curta.\n"
+        "\n"
+        "Saída: devolva APENAS um JSON válido, sem texto fora do JSON."
+    )
 
     payload = {
         "channel": {"name": channel_name, "strict": strict_channel},
         "message_text": message_text,
         "author_display": author_display,
-        "roles_hint": roles_hint,
+        "author_roles_top2": author_roles_top2,
         "replied_user_display": replied_user_display or "",
         "replied_text": replied_text or "",
         "last5_author": last5_author,
@@ -99,8 +111,8 @@ def decide_action(
         "context_relevant": context_relevant,
         "context": context_block,
         "style_flags": style_flags,
-        "preference": {"politic_choice": PREFERRED_POLITIC},
         "flagged_by_moderation": flagged,
+        "preference": {"politic_choice": PREFERRED_POLITIC},
         "output_format": {
             "mode": "reply|no|mute",
             "reply": "string (only if mode is reply or no)",
@@ -110,7 +122,7 @@ def decide_action(
         }
     }
 
-    # Usa CHAT completions (compatível)
+    # Chamada compatível: chat.completions
     try:
         resp = client.chat.completions.create(
             model=OPENAI_MODEL,
@@ -118,28 +130,26 @@ def decide_action(
                 {"role": "system", "content": system},
                 {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
             ],
-            temperature=0.2,
-            max_tokens=260,
+            temperature=0.35,
+            max_tokens=280,
         )
         raw = (resp.choices[0].message.content or "").strip()
     except Exception:
-        # se a chamada falhar, a gente retorna erro “seco” ou mute se flagged
+        # Sem fallback “bonzinho”: se flagged, mute; senão, responde curto.
         if flagged:
             return {"mode": "mute", "mute_minutes": 60, "reason": "Conteúdo inadequado.", "target": "author"}
-        return {"mode": "no", "reply": "Não."}
+        return {"mode": "reply", "reply": "Entendi."}
 
     # Parse JSON
     try:
         data = json.loads(raw)
     except Exception:
-        # Se canal estrito e style_flags indica problema, muta
-        if strict_channel and any(style_flags.values()):
-            return {"mode": "mute", "mute_minutes": 30, "reason": "Forma inadequada para este canal.", "target": "author"}
+        # Se não veio JSON, decide de forma simples e curta.
         if flagged:
             return {"mode": "mute", "mute_minutes": 60, "reason": "Conteúdo inadequado.", "target": "author"}
-        return {"mode": "no", "reply": "Não."}
+        return {"mode": "reply", "reply": "Entendi."}
 
-    mode = data.get("mode", "no")
+    mode = data.get("mode", "reply")
 
     if mode == "mute":
         mins = int(data.get("mute_minutes", 60))
@@ -148,7 +158,8 @@ def decide_action(
         target = data.get("target", "author")
         return {"mode": "mute", "mute_minutes": mins, "reason": reason, "target": target}
 
-    if mode == "reply":
-        return {"mode": "reply", "reply": _clean_sentence(data.get("reply", ""))}
+    if mode == "no":
+        return {"mode": "no", "reply": "Não."}
 
-    return {"mode": "no", "reply": "Não."}
+    # default reply
+    return {"mode": "reply", "reply": _clean_sentence(data.get("reply", "Entendi"))}
