@@ -9,23 +9,37 @@ MAX_MUTE_MIN = int(os.getenv("MAX_MUTE_MIN", "10080"))
 MIN_MUTE_MIN = int(os.getenv("MIN_MUTE_MIN", "1"))
 
 PREFERRED_POLITIC = os.getenv("PREFERRED_POLITIC", "Bolsonaro")
-OPENAI_REQ_TIMEOUT = float(os.getenv("OPENAI_REQ_TIMEOUT", "20"))  # timeout real HTTP
+OPENAI_REQ_TIMEOUT = float(os.getenv("OPENAI_REQ_TIMEOUT", "20"))
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+# abreviações comuns de palavrão/mandar se ferrar
+ABBR_MAP = {
+    r"\bfdp\b": "filho da puta",
+    r"\bfds\b": "foda-se",
+    r"\bvsf\b": "vai se foder",
+    r"\bpqp\b": "puta que pariu",
+    r"\bkrl\b": "caralho",
+    r"\bcrl\b": "caralho",
+    r"\bporra\b": "porra",
+    r"\bmerda\b": "merda",
+}
+
+def normalize_text(s: str) -> str:
+    t = re.sub(r"\s+", " ", (s or "")).strip().lower()
+    for pat, rep in ABBR_MAP.items():
+        t = re.sub(pat, rep, t, flags=re.IGNORECASE)
+    return t
 
 def _clean_sentence(s: str) -> str:
     s = re.sub(r"\s+", " ", (s or "")).strip()
     if not s:
         return "Não."
-    # remove pontuação duplicada tipo "?.", "!.", ".."
     s = re.sub(r"([!?\.])\.+$", r"\1", s)
-    # se terminar com ? ! . está ok
     if re.search(r"[.!?]$", s):
         return s
-    # se terminar com separadores, troca por ponto
     if re.search(r"[,;:]$", s):
         return re.sub(r"[,;:]+$", ".", s)
-    # caso geral: adiciona ponto
     return s + "."
 
 def run_moderation(text: str) -> Dict[str, Any]:
@@ -58,8 +72,11 @@ def decide_action(
     style_flags: Dict[str, bool],
 ) -> Dict[str, Any]:
 
-    combined = (message_text or "") + ("\n" + replied_text if replied_text else "")
-    mod = run_moderation(combined)
+    norm_message = normalize_text(message_text or "")
+    norm_replied = normalize_text(replied_text or "") if replied_text else ""
+    combined_norm = (norm_message + "\n" + norm_replied).strip()
+
+    mod = run_moderation(combined_norm if combined_norm else (message_text or ""))
     flagged = _flagged(mod)
 
     # Canal estrito: marcou o bot com forma ruim => mute direto
@@ -80,9 +97,13 @@ def decide_action(
         "- Nunca diga que é robô ou humano.\n"
         "- Nunca peça desculpas.\n"
         "- Nunca faça sermão.\n"
-        "- Sempre escreva com gramática correta.\n"
-        "- Termine a frase com '.', '!' ou '?'.\n"
+        "- Nunca escreva frases de atendimento do tipo 'como posso ajudar' ou 'se quiser posso'.\n"
+        "- Não ofereça ajuda extra no final. Responda e pare.\n"
         "- Seja curto e direto.\n"
+        "- Gramática correta; termine com '.', '!' ou '?'.\n"
+        "\n"
+        "Interpretação:\n"
+        "- Trate abreviações como 'fdp', 'fds', 'vsf', 'pqp', 'krl' como palavrões.\n"
         "\n"
         "Política:\n"
         "- REGRA PADRÃO: responda normalmente, inclusive cumprimentos.\n"
@@ -92,16 +113,13 @@ def decide_action(
         "Preferência:\n"
         "- Se a pergunta for 'Lula ou Bolsonaro', responda exatamente com a preferência configurada.\n"
         "\n"
-        "Contexto:\n"
-        "- Se o contexto do GitHub for relevante, baseie a resposta nele.\n"
-        "- Se não for relevante, responda com conhecimento geral, curto.\n"
-        "\n"
         "Saída: devolva APENAS JSON válido, sem texto fora do JSON."
     )
 
     payload = {
         "channel": {"name": channel_name, "strict": strict_channel},
         "message_text": message_text,
+        "message_text_normalized": combined_norm,
         "author_display": author_display,
         "author_roles_top2": author_roles_top2,
         "replied_user_display": replied_user_display or "",
@@ -137,7 +155,6 @@ def decide_action(
         )
         raw = (resp.choices[0].message.content or "").strip()
     except Exception:
-        # Se falhou OpenAI: sem “bondade”, mas também sem travar.
         if flagged:
             return {"mode": "mute", "mute_minutes": 60, "reason": "Conteúdo inadequado.", "target": "author"}
         return {"mode": "reply", "reply": "Entendi."}
