@@ -68,11 +68,53 @@ def _clean_sentence(s: str) -> str:
     return s + "."
 
 def _strip_meta(reply: str) -> str:
-    """Fallback duro: se o modelo tentar falar meta, neutraliza."""
     r = (reply or "").strip()
     low = r.lower()
     if any(re.search(p, low) for p in META_BANNED_PATTERNS):
         return "Entendi."
+    return r
+
+def _strip_questions(reply: str) -> str:
+    # Remove perguntas (você pediu sem puxar assunto)
+    r = (reply or "").strip()
+    # se a IA tentar emendar pergunta, corta no primeiro '?'
+    if "?" in r:
+        r = r.split("?", 1)[0].strip()
+        if not r:
+            r = "Entendi."
+        # garante ponto
+        if not re.search(r"[.!?]$", r):
+            r += "."
+    return r
+
+def _enforce_brevity(reply: str) -> str:
+    """
+    Regra:
+    - padrão: 1 frase curta
+    - se tiver muito longo, corta para ~14 palavras
+    - nunca termina com ':' ';' ','
+    """
+    r = (reply or "").strip()
+    # remove quebras exageradas
+    r = re.sub(r"\s+", " ", r).strip()
+
+    # se tiver múltiplas frases, mantém no máximo 2
+    parts = re.split(r"(?<=[.!])\s+", r)
+    parts = [p.strip() for p in parts if p.strip()]
+    if len(parts) > 2:
+        r = " ".join(parts[:2])
+    else:
+        r = " ".join(parts)
+
+    words = r.split()
+    if len(words) > 14:
+        r = " ".join(words[:14]).strip()
+        if not re.search(r"[.!?]$", r):
+            r += "."
+
+    r = re.sub(r"[,;:]+$", ".", r)
+    if not re.search(r"[.!?]$", r):
+        r += "."
     return r
 
 def run_moderation(text: str) -> Dict[str, Any]:
@@ -134,26 +176,29 @@ def decide_action(
         "- Nunca diga que é robô ou humano.\n"
         "- Nunca peça desculpas.\n"
         "- Nunca faça sermão.\n"
-        "- Não ofereça ajuda extra no final. Responda e pare.\n"
+        "- Nunca puxe assunto.\n"
+        "- Nunca faça perguntas de volta.\n"
+        "- Não ofereça ajuda extra no final.\n"
         "- Seja curto e direto.\n"
+        "- Regra de tamanho: 1 frase curta por padrão. No máximo 2 frases se necessário.\n"
         "- Gramática correta; termine com '.', '!' ou '?'.\n"
         "\n"
         "PROIBIDO:\n"
-        "- NUNCA escreva frases meta como 'sem infração', 'mensagem respondida', 'denúncia', 'análise', 'relatório'.\n"
-        f"- NUNCA mencione o próprio bot (<@{bot_user_id}> ou <@!{bot_user_id}>).\n"
-        "- NUNCA use vocativos com nomes (ex.: 'Editi,', 'Fulano,').\n"
+        "- Frases meta como 'sem infração', 'mensagem respondida', 'denúncia', 'análise', 'relatório'.\n"
+        f"- Mencionar o próprio bot (<@{bot_user_id}> ou <@!{bot_user_id}>).\n"
+        "- Vocativos com nomes (ex.: 'Editi,').\n"
         "\n"
-        "Regra de decisão:\n"
+        "Decisão:\n"
         "- Se houver infração: mode='mute'.\n"
-        "- Se NÃO houver infração: mode='reply' e responda CONVERSANDO sobre o conteúdo.\n"
-        "- Use 'Não.' somente para pedidos indevidos (ilegal/perigoso/sexual explícito/ódio/assédio/burlar regras).\n"
+        "- Se NÃO houver infração: mode='reply' e responda sobre o conteúdo, sem meta.\n"
+        "- Use 'Não.' apenas para pedidos indevidos (ilegal/perigoso/sexual explícito/ódio/assédio/burlar regras).\n"
         "\n"
         "Reply implícito:\n"
         "- Se implicit_reply=true, trate como conversa sobre a mensagem respondida.\n"
         "- Se a infração estiver na mensagem respondida, aplique mute no autor dela (target='replied_user').\n"
         "- Se não houver infração:\n"
         "  - Se reporter_needs_reply=false, responda apenas ao replied_user (sem mencionar o autor do reply).\n"
-        "  - Se reporter_needs_reply=true, você pode responder ambos, mas só usando as menções fornecidas.\n"
+        "  - Se reporter_needs_reply=true, pode responder ambos, usando apenas as menções fornecidas.\n"
         "\n"
         "Preferência:\n"
         "- Se a pergunta for 'Lula ou Bolsonaro', responda exatamente com a preferência configurada.\n"
@@ -192,8 +237,8 @@ def decide_action(
                 {"role": "system", "content": system},
                 {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
             ],
-            temperature=0.35,
-            max_tokens=280,
+            temperature=0.25,
+            max_tokens=220,
             timeout=OPENAI_REQ_TIMEOUT
         )
         raw = (resp.choices[0].message.content or "").strip()
@@ -226,4 +271,6 @@ def decide_action(
 
     reply = _clean_sentence(data.get("reply", "Entendi."))
     reply = _strip_meta(reply)
+    reply = _strip_questions(reply)      # ✅ sem puxar assunto
+    reply = _enforce_brevity(reply)      # ✅ curto por padrão
     return {"mode": "reply", "reply": reply}
