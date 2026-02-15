@@ -5,10 +5,11 @@ from openai import OpenAI
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
 MOD_MODEL = os.getenv("MOD_MODEL", "omni-moderation-latest")
 
-MAX_MUTE_MIN = int(os.getenv("MAX_MUTE_MIN", "10080"))  # 7 dias
+MAX_MUTE_MIN = int(os.getenv("MAX_MUTE_MIN", "10080"))
 MIN_MUTE_MIN = int(os.getenv("MIN_MUTE_MIN", "1"))
 
 PREFERRED_POLITIC = os.getenv("PREFERRED_POLITIC", "Bolsonaro")
+OPENAI_REQ_TIMEOUT = float(os.getenv("OPENAI_REQ_TIMEOUT", "20"))  # timeout real HTTP
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
@@ -16,12 +17,23 @@ def _clean_sentence(s: str) -> str:
     s = re.sub(r"\s+", " ", (s or "")).strip()
     if not s:
         return "Não."
-    if not s.endswith("."):
-        s += "."
-    return s
+    # remove pontuação duplicada tipo "?.", "!.", ".."
+    s = re.sub(r"([!?\.])\.+$", r"\1", s)
+    # se terminar com ? ! . está ok
+    if re.search(r"[.!?]$", s):
+        return s
+    # se terminar com separadores, troca por ponto
+    if re.search(r"[,;:]$", s):
+        return re.sub(r"[,;:]+$", ".", s)
+    # caso geral: adiciona ponto
+    return s + "."
 
 def run_moderation(text: str) -> Dict[str, Any]:
-    return client.moderations.create(model=MOD_MODEL, input=text).to_dict()
+    return client.moderations.create(
+        model=MOD_MODEL,
+        input=text,
+        timeout=OPENAI_REQ_TIMEOUT
+    ).to_dict()
 
 def _flagged(mod: Dict[str, Any]) -> bool:
     try:
@@ -45,23 +57,12 @@ def decide_action(
     strict_channel: bool,
     style_flags: Dict[str, bool],
 ) -> Dict[str, Any]:
-    """
-    return:
-      {
-        "mode": "reply" | "no" | "mute",
-        "reply": "texto" (se mode=reply/no),
-        "mute_minutes": int (se mode=mute),
-        "reason": "motivo" (se mode=mute),
-        "target": "author" | "replied_user" (se mode=mute),
-      }
-    """
 
     combined = (message_text or "") + ("\n" + replied_text if replied_text else "")
     mod = run_moderation(combined)
     flagged = _flagged(mod)
 
-    # Se for canal estrito e a pessoa marcou o bot com forma ruim: MUTE direto.
-    # (Você pediu tolerância zero nesses canais.)
+    # Canal estrito: marcou o bot com forma ruim => mute direto
     if strict_channel and any(bool(v) for v in style_flags.values()):
         return {
             "mode": "mute",
@@ -79,22 +80,23 @@ def decide_action(
         "- Nunca diga que é robô ou humano.\n"
         "- Nunca peça desculpas.\n"
         "- Nunca faça sermão.\n"
-        "- Sempre escreva com gramática e termine com ponto final.\n"
+        "- Sempre escreva com gramática correta.\n"
+        "- Termine a frase com '.', '!' ou '?'.\n"
         "- Seja curto e direto.\n"
         "\n"
-        "Política de resposta:\n"
-        "- REGRA PADRÃO: responda normalmente e de forma natural, mesmo que seja apenas um cumprimento.\n"
-        "- Use 'Não.' somente quando o usuário pedir algo indevido, perigoso, ilegal, sexual explícito, discurso de ódio, assédio, ou tentativa clara de burlar moderação.\n"
-        "- Se houver motivo para punição (palavrões graves, ódio, sexual, spam, calúnia sem evidência no contexto apresentado), use modo 'mute'.\n"
+        "Política:\n"
+        "- REGRA PADRÃO: responda normalmente, inclusive cumprimentos.\n"
+        "- Use 'Não.' somente para pedidos indevidos (ilegal/perigoso/sexual explícito/ódio/assédio/burlar regras).\n"
+        "- Se for caso de punição (palavrões graves, ódio, sexual, spam, calúnia sem evidência no contexto apresentado), use modo 'mute'.\n"
         "\n"
-        "Preferência configurada:\n"
+        "Preferência:\n"
         "- Se a pergunta for 'Lula ou Bolsonaro', responda exatamente com a preferência configurada.\n"
         "\n"
-        "Uso de contexto:\n"
+        "Contexto:\n"
         "- Se o contexto do GitHub for relevante, baseie a resposta nele.\n"
-        "- Se não for relevante, responda com conhecimento geral de forma curta.\n"
+        "- Se não for relevante, responda com conhecimento geral, curto.\n"
         "\n"
-        "Saída: devolva APENAS um JSON válido, sem texto fora do JSON."
+        "Saída: devolva APENAS JSON válido, sem texto fora do JSON."
     )
 
     payload = {
@@ -122,7 +124,6 @@ def decide_action(
         }
     }
 
-    # Chamada compatível: chat.completions
     try:
         resp = client.chat.completions.create(
             model=OPENAI_MODEL,
@@ -132,19 +133,18 @@ def decide_action(
             ],
             temperature=0.35,
             max_tokens=280,
+            timeout=OPENAI_REQ_TIMEOUT
         )
         raw = (resp.choices[0].message.content or "").strip()
     except Exception:
-        # Sem fallback “bonzinho”: se flagged, mute; senão, responde curto.
+        # Se falhou OpenAI: sem “bondade”, mas também sem travar.
         if flagged:
             return {"mode": "mute", "mute_minutes": 60, "reason": "Conteúdo inadequado.", "target": "author"}
         return {"mode": "reply", "reply": "Entendi."}
 
-    # Parse JSON
     try:
         data = json.loads(raw)
     except Exception:
-        # Se não veio JSON, decide de forma simples e curta.
         if flagged:
             return {"mode": "mute", "mute_minutes": 60, "reason": "Conteúdo inadequado.", "target": "author"}
         return {"mode": "reply", "reply": "Entendi."}
@@ -154,12 +154,11 @@ def decide_action(
     if mode == "mute":
         mins = int(data.get("mute_minutes", 60))
         mins = max(MIN_MUTE_MIN, min(MAX_MUTE_MIN, mins))
-        reason = _clean_sentence(data.get("reason", "Violação de regras."))
+        reason = _clean_sentence(data.get("reason", "Violação de regras"))
         target = data.get("target", "author")
         return {"mode": "mute", "mute_minutes": mins, "reason": reason, "target": target}
 
     if mode == "no":
         return {"mode": "no", "reply": "Não."}
 
-    # default reply
     return {"mode": "reply", "reply": _clean_sentence(data.get("reply", "Entendi"))}
