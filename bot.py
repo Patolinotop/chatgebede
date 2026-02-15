@@ -1,6 +1,6 @@
 import os, asyncio, re, traceback, time, unicodedata
 from datetime import timedelta
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Tuple
 
 import discord
 from discord.ext import commands
@@ -18,6 +18,11 @@ DEBUG_ERRORS_IN_DISCORD = os.getenv("DEBUG_ERRORS_IN_DISCORD", "0") == "1"
 OPENAI_TIMEOUT_SEC = float(os.getenv("OPENAI_TIMEOUT_SEC", "25"))
 
 ADMIN_NAMES = [x.strip().lower() for x in (os.getenv("ADMIN_NAMES", "")).split(",") if x.strip()]
+
+# thresholds
+EMOJI_FLOOD_SINGLE = int(os.getenv("EMOJI_FLOOD_SINGLE", "8"))     # 8+ emojis numa msg
+EMOJI_FLOOD_WINDOW = int(os.getenv("EMOJI_FLOOD_WINDOW", "15"))    # 15+ emojis somando últimas 5
+REPEAT_SPAM_COUNT = int(os.getenv("REPEAT_SPAM_COUNT", "3"))       # 3 repetições
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -81,19 +86,13 @@ def strip_bot_mention(text: str) -> str:
     return t.strip()
 
 async def apply_timeout(member: discord.Member, minutes: int, reason: str):
-    """
-    Discord.py 2.x: o método correto é member.timeout(...)
-    Alguns builds aceitam communication_disabled_until no edit.
-    """
     until = discord.utils.utcnow() + timedelta(minutes=minutes)
-
     if hasattr(member, "timeout"):
         await member.timeout(until, reason=reason)
         return
-
-    # fallback compatível com builds antigos
     await member.edit(communication_disabled_until=until, reason=reason)
 
+# ---------- canal estrito + estilo ----------
 RELAXED_CHANNEL_KEYWORDS = {"geral", "chat", "bate-papo", "batepapo", "conversa"}
 STRICT_CHANNEL_KEYWORDS = {
     "militar", "graduad", "avisos", "anuncio", "anúncio", "regras", "midia", "mídia",
@@ -110,13 +109,15 @@ def is_strict_channel(name: str) -> bool:
 
 SLANG = {"eae", "q", "pq", "fds", "fdp", "mano", "véi", "vei", "ta", "tá", "blz", "kkk", "kkkk"}
 
+def has_custom_emoji(s: str) -> bool:
+    return bool(re.search(r"<a?:\w+:\d+>", s))
+
+def count_unicode_emojis(s: str) -> int:
+    # conta caracteres 'So' como proxy de emoji
+    return sum(1 for ch in s if unicodedata.category(ch) == "So")
+
 def has_emoji(s: str) -> bool:
-    if re.search(r"<a?:\w+:\d+>", s):
-        return True
-    for ch in s:
-        if unicodedata.category(ch) == "So":
-            return True
-    return False
+    return has_custom_emoji(s) or (count_unicode_emojis(s) > 0)
 
 def bad_caps(s: str) -> bool:
     letters = [c for c in s if c.isalpha()]
@@ -148,6 +149,45 @@ def compute_style_flags(text: str) -> Dict[str, bool]:
         "punctuation": bad_punctuation(text),
     }
 
+# ---------- spam / flood ----------
+def normalize_for_repeat(s: str) -> str:
+    s = (s or "").strip().lower()
+    s = re.sub(r"\s+", " ", s)
+    # remove menções e pontuação “leve” pra pegar repetição mesmo com variações
+    s = re.sub(r"<@!?\d+>", "", s)
+    s = re.sub(r"[^\wÀ-ÿ ]+", "", s)
+    return s.strip()
+
+def repeat_count(current: str, last_msgs: List[str]) -> int:
+    cur = normalize_for_repeat(current)
+    if not cur:
+        return 0
+    all_msgs = [normalize_for_repeat(x) for x in ([current] + last_msgs)]
+    return sum(1 for x in all_msgs if x == cur)
+
+def emoji_count_text(s: str) -> int:
+    return (count_unicode_emojis(s) + (len(re.findall(r"<a?:\w+:\d+>", s))))
+
+def emoji_window_count(current: str, last_msgs: List[str]) -> int:
+    total = emoji_count_text(current)
+    for m in last_msgs[:5]:
+        total += emoji_count_text(m)
+    return total
+
+def compute_spam_flags(current: str, last_msgs: List[str]) -> Dict[str, bool]:
+    rep = repeat_count(current, last_msgs)
+    e_single = emoji_count_text(current)
+    e_window = emoji_window_count(current, last_msgs)
+    return {
+        "repeat_spam": rep >= REPEAT_SPAM_COUNT,
+        "emoji_flood_single": e_single >= EMOJI_FLOOD_SINGLE,
+        "emoji_flood_window": e_window >= EMOJI_FLOOD_WINDOW,
+        "repeat_count": rep,
+        "emoji_single": e_single,
+        "emoji_window": e_window,
+    }
+
+# ---------- handler ----------
 async def _handle_message(message: discord.Message):
     if not isinstance(message.channel, discord.TextChannel):
         return
@@ -173,15 +213,7 @@ async def _handle_message(message: discord.Message):
             if not isinstance(author, discord.Member):
                 return
 
-            author_text = strip_bot_mention(message.content or "")
-            _log(f"Texto limpo: {author_text!r}")
-            if not author_text:
-                _log("Sem texto após remover mention.")
-                return
-
-            style_flags = compute_style_flags(author_text)
-            _log(f"Style flags: {style_flags}")
-
+            # reply context
             replied_user: Optional[discord.Member] = None
             replied_text: Optional[str] = None
             if message.reference and isinstance(message.reference.resolved, discord.Message):
@@ -190,12 +222,32 @@ async def _handle_message(message: discord.Message):
                     replied_user = replied_msg.author
                 replied_text = (replied_msg.content or "").strip()
 
+            # author text
+            author_text = strip_bot_mention(message.content or "")
+            _log(f"Texto limpo: {author_text!r}")
+
+            # ✅ FIX: se só mencionou o bot sem texto, mas está respondendo alguém,
+            # trate como pedido de análise da mensagem respondida.
+            if not author_text and replied_text:
+                author_text = "Analise a mensagem respondida."
+                _log("Texto vazio após menção; usando comando implícito de análise do reply.")
+
+            if not author_text:
+                _log("Sem texto após remover mention.")
+                return
+
+            style_flags = compute_style_flags(author_text)
+            _log(f"Style flags: {style_flags}")
+
             last5_author = await last_n_messages_from(message.channel, author.id, 5)
             last5_other = []
             if replied_user:
                 last5_other = await last_n_messages_from(message.channel, replied_user.id, 5)
 
             _log(f"Hist autor(5): {len(last5_author)} | outro(5): {len(last5_other)}")
+
+            spam_flags = compute_spam_flags(author_text, last5_author)
+            _log(f"Spam flags: {spam_flags}")
 
             _log("Iniciando RAG...")
             contexts, best_sim = await asyncio.wait_for(
@@ -226,6 +278,7 @@ async def _handle_message(message: discord.Message):
                     ch_name,
                     strict,
                     style_flags,
+                    spam_flags,
                 ),
                 timeout=OPENAI_TIMEOUT_SEC
             )
