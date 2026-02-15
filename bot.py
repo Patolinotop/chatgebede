@@ -80,9 +80,19 @@ def strip_bot_mention(text: str) -> str:
     t = re.sub(rf"<@!?{bot.user.id}>", "", (text or ""))
     return t.strip()
 
-async def try_timeout(member: discord.Member, minutes: int, reason: str):
+async def apply_timeout(member: discord.Member, minutes: int, reason: str):
+    """
+    Discord.py 2.x: o método correto é member.timeout(...)
+    Alguns builds aceitam communication_disabled_until no edit.
+    """
     until = discord.utils.utcnow() + timedelta(minutes=minutes)
-    await member.edit(timeout=until, reason=reason)
+
+    if hasattr(member, "timeout"):
+        await member.timeout(until, reason=reason)
+        return
+
+    # fallback compatível com builds antigos
+    await member.edit(communication_disabled_until=until, reason=reason)
 
 RELAXED_CHANNEL_KEYWORDS = {"geral", "chat", "bate-papo", "batepapo", "conversa"}
 STRICT_CHANNEL_KEYWORDS = {
@@ -165,7 +175,6 @@ async def _handle_message(message: discord.Message):
 
             author_text = strip_bot_mention(message.content or "")
             _log(f"Texto limpo: {author_text!r}")
-
             if not author_text:
                 _log("Sem texto após remover mention.")
                 return
@@ -234,7 +243,7 @@ async def _handle_message(message: discord.Message):
                     return
 
                 try:
-                    await try_timeout(target, int(action["mute_minutes"]), action["reason"])
+                    await apply_timeout(target, int(action["mute_minutes"]), action["reason"])
                 except discord.Forbidden:
                     _log("Forbidden ao tentar mutar (hierarquia/permissão).")
                     if DEBUG_ERRORS_IN_DISCORD:
