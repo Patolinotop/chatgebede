@@ -19,8 +19,7 @@ OPENAI_TIMEOUT_SEC = float(os.getenv("OPENAI_TIMEOUT_SEC", "25"))
 
 ADMIN_NAMES = [x.strip().lower() for x in (os.getenv("ADMIN_NAMES", "")).split(",") if x.strip()]
 
-# thresholds
-EMOJI_FLOOD_SINGLE = int(os.getenv("EMOJI_FLOOD_SINGLE", "7"))      # mínimo 7 na mesma mensagem
+EMOJI_FLOOD_SINGLE = int(os.getenv("EMOJI_FLOOD_SINGLE", "7"))
 EMOJI_FLOOD_WINDOW = int(os.getenv("EMOJI_FLOOD_WINDOW", "15"))
 REPEAT_SPAM_COUNT = int(os.getenv("REPEAT_SPAM_COUNT", "3"))
 
@@ -84,6 +83,15 @@ def strip_bot_mention(text: str) -> str:
         return (text or "").strip()
     t = re.sub(rf"<@!?{bot.user.id}>", "", (text or ""))
     return t.strip()
+
+def strip_self_mentions(text: str) -> str:
+    """Remove qualquer menção ao próprio bot que a IA possa ter cuspido."""
+    if not bot.user:
+        return (text or "").strip()
+    t = (text or "")
+    t = re.sub(rf"<@!?{bot.user.id}>", "", t)
+    t = re.sub(r"\s{2,}", " ", t).strip()
+    return t
 
 async def apply_timeout(member: discord.Member, minutes: int, reason: str):
     until = discord.utils.utcnow() + timedelta(minutes=minutes)
@@ -236,7 +244,6 @@ async def _handle_message(message: discord.Message):
             if not isinstance(author, discord.Member):
                 return
 
-            # reply context
             replied_user: Optional[discord.Member] = None
             replied_text: Optional[str] = None
             replied_msg_obj: Optional[discord.Message] = None
@@ -251,7 +258,6 @@ async def _handle_message(message: discord.Message):
             author_text = raw_after_strip
             _log(f"Texto limpo: {author_text!r}")
 
-            # ✅ novo: flag de reply implícito
             implicit_reply = False
             if not author_text and replied_text:
                 implicit_reply = True
@@ -288,6 +294,7 @@ async def _handle_message(message: discord.Message):
 
             author_mention = f"<@{author.id}>"
             replied_mention = f"<@{replied_user.id}>" if replied_user else ""
+            bot_user_id = bot.user.id if bot.user else 0
 
             _log("Iniciando decide_action (OpenAI)...")
             action = await asyncio.wait_for(
@@ -308,11 +315,11 @@ async def _handle_message(message: discord.Message):
                     strict,
                     style_flags,
                     spam_flags,
-                    # novos campos
                     implicit_reply,
                     raw_after_strip,
                     author_mention,
                     replied_mention,
+                    bot_user_id,
                 ),
                 timeout=OPENAI_TIMEOUT_SEC
             )
@@ -363,7 +370,7 @@ async def _handle_message(message: discord.Message):
                 _log(f"Concluído em {time.time()-t0:.2f}s (mute)")
                 return
 
-            reply_text = action.get("reply", "Não.")
+            reply_text = strip_self_mentions(action.get("reply", "Não."))
             await message.reply(reply_text, mention_author=False)
             _log(f"Concluído em {time.time()-t0:.2f}s (reply)")
 
