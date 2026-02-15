@@ -27,9 +27,9 @@ III - tudo o que lhe foi passado durante o alistamento militar é fundamental e 
 IV - estrangeiros devem ser fluentes no português brasileiro.
 V - o uso correto da norma culta da língua portuguesa, tanto em base quanto nos chats militares, deve ser mantido.
 VI - é proibido o compartilhamento de contas ou informações sigilosas que militares, civis ou membros de outras instituições não deveriam ter acesso.
-VII - A constituição do Exército Brasileiro e Constituição Federal Brasileira, devem ser seguidas, em todos servidores relacionados ao Exército Brasileiro do tevez_segundo.
+VII - A constituição do Exército Brasileiro e Constituição Federal Brasileira, devem ser seguidas, em todos servidores relacionados ao Exército Brasileiro do japex_hard.
 
-Art. 2.º Para um militar do Exército Brasileiro do Tevez, exceto o Alto Escalão e o Generalato:
+Art. 2.º Para um militar do Exército Brasileiro do japex_hard, exceto o Alto Escalão e o Generalato:
 
 I - o uso do fardamento é obrigatório.
 Contanto que a boina ou o capacete estejam sendo usados, o restante do fardamento poderá ser personalizado à vontade do militar.
@@ -38,7 +38,7 @@ III - a partir da patente Major, o militar tem o direito de personalizar o próp
 IV - militares VIPs podem utilizar o fardamento personalizado, contanto que de cunho militar.
 
 
-Art. 3.º Será aplicado exílio permanente ao militar que, simultaneamente, participar do Exército Brasileiro do Tevez e: 
+Art. 3.º Será aplicado exílio permanente ao militar que, simultaneamente, participar do Exército Brasileiro do japex e: 
 I - fizer parte de outra instituição militar;
 II - participar de qualquer evento com o fito de integrar outra instituição militar;
 III - participar direta e ativamente na criação ou gerenciamento de experiências militares:
@@ -212,7 +212,7 @@ II - Caso um militar, independentemente da patente, declare que sua permanência
 Se, mesmo aconselhado, o militar optar por permanecer, deverá fazê-lo de forma consciente, responsabilizando-se por essa escolha e comprometendo-se a não continuar mencionando o fato publicamente de modo a preservar o ambiente coletivo;
 A insistência em declarações negativas sobre a instituição por parte do militar, mesmo após aconselhamento e orientação, poderá resultar em afastamento temporário ou remoção da função hierárquica, como medida de precaução e preservação mútua. 
 III - O EB reconhece a importância da saúde mental e incentiva que seus membros procurem apoio externo sempre que necessário. A comunidade não substitui suporte profissional;
-IV - É terminantemente proibida a prática de web namoro, relacionamentos virtuais ou qualquer ato de conotação afetiva/romântica nos servidores, grupos e demais ambientes relacionados ao Exército Brasileiro, sejam eles expostos no jogo ou em canais vinculados aos servidores oficiais do Exército Brasileiro do Tevez.
+IV - É terminantemente proibida a prática de web namoro, relacionamentos virtuais ou qualquer ato de conotação afetiva/romântica nos servidores, grupos e demais ambientes relacionados ao Exército Brasileiro, sejam eles expostos no jogo ou em canais vinculados aos servidores oficiais do Exército Brasileiro do japex.
 
 
 Art. 19. Responsabilidade individual e denúncias:
@@ -488,7 +488,7 @@ V - preconceitos estruturais e sociais (racismo, homofobia, xenofobia...);
 VI - ofensas por meio de palavras de baixo calão, cunho adulto e doenças físicas ou mentais contra algum indivíduo da comunidade;
 VII - envio de convites para servidores externos no privado de alguém sem a autorização da pessoa;
 VIII - utilização ou divulgação da imagem de alguém sem autorização.
-IX - A conduta de todos os membros do Exército Brasileiro do tevez_segundo deve ser pautada pelo respeito às leis da Constituição Federal Brasileira. Isso inclui, especialmente, as leis que tratam de crimes contra a honra (calúnia, injúria e difamação), crimes de ódio, discriminação e incitação à violência.
+IX - A conduta de todos os membros do Exército Brasileiro do japex_hard deve ser pautada pelo respeito às leis da Constituição Federal Brasileira. Isso inclui, especialmente, as leis que tratam de crimes contra a honra (calúnia, injúria e difamação), crimes de ódio, discriminação e incitação à violência.
 X - Qualquer ato ou comportamento, seja no Roblox ou em servidores do Discord relacionados ao Exército Brasileiro, que configure violação das leis mencionadas no tópico IX , resultará em banimento imediato e permanente da comunidade, sem aviso prévio.
 
 Parágrafo único. A divulgação no perfil é permitida contanto que:
@@ -534,25 +534,26 @@ VI - Cada setor do Centro de Comunicação possui seus próprios regulamentos e 
 
 ╭────────── ✯ ──────────╮
 CRIADOR [EB]
-tevez_segundo
+japex_hard
 
-ALTO ESCALÃO DO EXÉRCITO 
-DkMadarinha
+MANAGER
+vini
+
+DEVELOPERS
+eohacki
+(talvez algum outro futuramente, mas atualmente apenas um)
 
 
-AUXILIARES
-n1k0st1
-dxrkeus
-Gavimaster_YT
-jessikitha147
-LulasAltk
-jfjgxmxgkg
-rafaesisimo
-jairnair
-Web_gaz1in
+SUPORTE
+lalomaio
+kevin
+lucaspeo
+
+
 ╰────────── ✯ ──────────╯
 
 27/07/2025
+
 
 
 
