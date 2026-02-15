@@ -31,6 +31,17 @@ GENERIC_REPORTER_PATTERNS = [
     r"^(resolve|da uma olhada|dá uma olhada)\s*$",
 ]
 
+META_BANNED_PATTERNS = [
+    r"mensagem respondida",
+    r"não apresenta infração",
+    r"sem infração",
+    r"não há infração",
+    r"apenas cumprimentando",
+    r"analis(e|ei|ando) (a|o) mensagem",
+    r"denúncia",
+    r"report(e|ei|ando)",
+]
+
 def normalize_text(s: str) -> str:
     t = re.sub(r"\s+", " ", (s or "")).strip().lower()
     for pat, rep in ABBR_MAP.items():
@@ -43,19 +54,26 @@ def reporter_needs_reply(author_raw_text: str) -> bool:
     for pat in GENERIC_REPORTER_PATTERNS:
         if re.match(pat, t):
             return False
-    # se tem texto “real”, presume que ele quer participar da conversa
     return True
 
 def _clean_sentence(s: str) -> str:
     s = re.sub(r"\s+", " ", (s or "")).strip()
     if not s:
-        return "Não."
+        return "Entendi."
     s = re.sub(r"([!?\.])\.+$", r"\1", s)
     if re.search(r"[.!?]$", s):
         return s
     if re.search(r"[,;:]$", s):
         return re.sub(r"[,;:]+$", ".", s)
     return s + "."
+
+def _strip_meta(reply: str) -> str:
+    """Fallback duro: se o modelo tentar falar meta, neutraliza."""
+    r = (reply or "").strip()
+    low = r.lower()
+    if any(re.search(p, low) for p in META_BANNED_PATTERNS):
+        return "Entendi."
+    return r
 
 def run_moderation(text: str) -> Dict[str, Any]:
     return client.moderations.create(
@@ -107,7 +125,6 @@ def decide_action(
         return {"mode": "mute", "mute_minutes": 30, "reason": "Forma inadequada para este canal.", "target": "author"}
 
     context_block = "\n\n---\n\n".join(contexts[:5]) if (context_relevant and contexts) else ""
-
     needs_reply = reporter_needs_reply(author_raw_text) if implicit_reply else True
 
     system = (
@@ -117,31 +134,31 @@ def decide_action(
         "- Nunca diga que é robô ou humano.\n"
         "- Nunca peça desculpas.\n"
         "- Nunca faça sermão.\n"
-        "- Nunca escreva frases de atendimento do tipo 'como posso ajudar' ou 'se quiser posso'.\n"
         "- Não ofereça ajuda extra no final. Responda e pare.\n"
         "- Seja curto e direto.\n"
         "- Gramática correta; termine com '.', '!' ou '?'.\n"
         "\n"
-        "Regra de menções:\n"
+        "PROIBIDO:\n"
+        "- NUNCA escreva frases meta como 'sem infração', 'mensagem respondida', 'denúncia', 'análise', 'relatório'.\n"
         f"- NUNCA mencione o próprio bot (<@{bot_user_id}> ou <@!{bot_user_id}>).\n"
-        "- Só mencione pessoas quando necessário.\n"
+        "- NUNCA use vocativos com nomes (ex.: 'Editi,', 'Fulano,').\n"
         "\n"
-        "Reply/denúncia:\n"
-        "- Se implicit_reply=true, o usuário respondeu uma mensagem e mencionou o bot.\n"
-        "- Se houver infração na mensagem respondida, use mode='mute' e target='replied_user'.\n"
-        "- Se NÃO houver infração:\n"
-        "  - Você DEVE responder com mode='reply' (nunca 'no').\n"
-        "  - Se reporter_needs_reply=false, responda apenas ao replied_user (não mencione o denunciante).\n"
-        "  - Se reporter_needs_reply=true, responda os dois, na ordem: replied_user depois autor.\n"
-        "\n"
-        "Política:\n"
+        "Regra de decisão:\n"
+        "- Se houver infração: mode='mute'.\n"
+        "- Se NÃO houver infração: mode='reply' e responda CONVERSANDO sobre o conteúdo.\n"
         "- Use 'Não.' somente para pedidos indevidos (ilegal/perigoso/sexual explícito/ódio/assédio/burlar regras).\n"
-        "- Se for caso de punição (palavrões graves, ódio, sexual, spam, calúnia sem evidência), use mode='mute'.\n"
+        "\n"
+        "Reply implícito:\n"
+        "- Se implicit_reply=true, trate como conversa sobre a mensagem respondida.\n"
+        "- Se a infração estiver na mensagem respondida, aplique mute no autor dela (target='replied_user').\n"
+        "- Se não houver infração:\n"
+        "  - Se reporter_needs_reply=false, responda apenas ao replied_user (sem mencionar o autor do reply).\n"
+        "  - Se reporter_needs_reply=true, você pode responder ambos, mas só usando as menções fornecidas.\n"
         "\n"
         "Preferência:\n"
         "- Se a pergunta for 'Lula ou Bolsonaro', responda exatamente com a preferência configurada.\n"
         "\n"
-        "Saída: devolva APENAS JSON válido, sem texto fora do JSON."
+        "Saída: devolva APENAS JSON válido."
     )
 
     payload = {
@@ -150,8 +167,6 @@ def decide_action(
         "author_raw_text": author_raw_text,
         "implicit_reply": implicit_reply,
         "reporter_needs_reply": needs_reply,
-        "author_display": author_display,
-        "replied_user_display": replied_user_display or "",
         "author_mention": author_mention,
         "replied_user_mention": replied_user_mention,
         "replied_text": replied_text or "",
@@ -159,21 +174,14 @@ def decide_action(
         "last5_other": last5_other,
         "context_relevant": context_relevant,
         "context": context_block,
-        "style_flags": style_flags,
-        "spam_flags": spam_flags,
         "flagged_by_moderation": flagged,
         "preference": {"politic_choice": PREFERRED_POLITIC},
-        "format_hint": (
-            "Se implicit_reply=true e não houver infração:\n"
-            "- Se reporter_needs_reply=false: comece com replied_user_mention e responda só ele.\n"
-            "- Se reporter_needs_reply=true: responda replied_user_mention e depois author_mention.\n"
-        ),
         "output_format": {
             "mode": "reply|no|mute",
-            "reply": "string (only if mode is reply or no)",
-            "mute_minutes": "int (only if mode is mute)",
-            "reason": "string (only if mode is mute)",
-            "target": "author|replied_user (only if mode is mute)"
+            "reply": "string",
+            "mute_minutes": "int",
+            "reason": "string",
+            "target": "author|replied_user"
         }
     }
 
@@ -211,9 +219,11 @@ def decide_action(
         return {"mode": "mute", "mute_minutes": mins, "reason": reason, "target": target}
 
     if mode == "no" and implicit_reply:
-        return {"mode": "reply", "reply": _clean_sentence(data.get("reply", "Entendi"))}
+        mode = "reply"
 
     if mode == "no":
         return {"mode": "no", "reply": "Não."}
 
-    return {"mode": "reply", "reply": _clean_sentence(data.get("reply", "Entendi"))}
+    reply = _clean_sentence(data.get("reply", "Entendi."))
+    reply = _strip_meta(reply)
+    return {"mode": "reply", "reply": reply}
