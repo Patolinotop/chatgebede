@@ -68,16 +68,15 @@ def decide_action(
     strict_channel: bool,
     style_flags: Dict[str, bool],
     spam_flags: Dict[str, Any],
+    implicit_reply: bool,
+    author_raw_text: str,
+    author_mention: str,
+    replied_user_mention: str,
 ) -> Dict[str, Any]:
 
     # spam/flood -> mute direto
     if spam_flags.get("repeat_spam") or spam_flags.get("emoji_flood_single") or spam_flags.get("emoji_flood_window"):
-        return {
-            "mode": "mute",
-            "mute_minutes": 15,
-            "reason": "Spam ou flood.",
-            "target": "author",
-        }
+        return {"mode": "mute", "mute_minutes": 15, "reason": "Spam ou flood.", "target": "author"}
 
     norm_message = normalize_text(message_text or "")
     norm_replied = normalize_text(replied_text or "") if replied_text else ""
@@ -88,12 +87,7 @@ def decide_action(
 
     # canal estrito: forma ruim ao marcar o bot => mute
     if strict_channel and any(bool(v) for v in style_flags.values()):
-        return {
-            "mode": "mute",
-            "mute_minutes": 30,
-            "reason": "Forma inadequada para este canal.",
-            "target": "author",
-        }
+        return {"mode": "mute", "mute_minutes": 30, "reason": "Forma inadequada para este canal.", "target": "author"}
 
     context_block = "\n\n---\n\n".join(contexts[:5]) if (context_relevant and contexts) else ""
 
@@ -111,8 +105,10 @@ def decide_action(
         "\n"
         "Interpretação:\n"
         "- Abreviações como 'fdp', 'fds', 'vsf', 'pqp', 'krl' contam como palavrões.\n"
-        "- Se o usuário mencionou o bot respondendo outra mensagem, avalie também a mensagem respondida.\n"
-        "- Se a infração estiver na mensagem respondida, aplique mute no autor da mensagem respondida (target='replied_user').\n"
+        "- Se implicit_reply=true, o usuário está respondendo uma mensagem e mencionou o bot.\n"
+        "  Isso pode ser conversa ou denúncia.\n"
+        "  Se NÃO houver infração, você DEVE responder em modo 'reply' (nunca 'no') e pode responder as duas pessoas.\n"
+        "  Se houver infração na mensagem respondida, use target='replied_user'.\n"
         "\n"
         "Política:\n"
         "- REGRA PADRÃO: responda normalmente, inclusive cumprimentos.\n"
@@ -128,9 +124,13 @@ def decide_action(
     payload = {
         "channel": {"name": channel_name, "strict": strict_channel},
         "message_text": message_text,
-        "replied_text": replied_text or "",
+        "author_raw_text": author_raw_text,
+        "implicit_reply": implicit_reply,
         "author_display": author_display,
         "replied_user_display": replied_user_display or "",
+        "author_mention": author_mention,
+        "replied_user_mention": replied_user_mention,
+        "replied_text": replied_text or "",
         "last5_author": last5_author,
         "last5_other": last5_other,
         "context_relevant": context_relevant,
@@ -139,6 +139,12 @@ def decide_action(
         "spam_flags": spam_flags,
         "flagged_by_moderation": flagged,
         "preference": {"politic_choice": PREFERRED_POLITIC},
+        "instruction_for_reply": (
+            "Se implicit_reply=true e não houver infração:\n"
+            "- Se author_raw_text estiver vazio (só menção), responda principalmente replied_user e inclua uma linha curta ao autor.\n"
+            "- Se author_raw_text tiver conteúdo, responda os dois explicitamente, no formato: "
+            f"'{replied_user_mention} ... {author_mention} ...' (nessa ordem)."
+        ),
         "output_format": {
             "mode": "reply|no|mute",
             "reply": "string (only if mode is reply or no)",
@@ -163,6 +169,7 @@ def decide_action(
     except Exception:
         if flagged:
             return {"mode": "mute", "mute_minutes": 60, "reason": "Conteúdo inadequado.", "target": "author"}
+        # se for reply implícito, nunca retornar "no"
         return {"mode": "reply", "reply": "Entendi."}
 
     try:
@@ -180,6 +187,10 @@ def decide_action(
         reason = _clean_sentence(data.get("reason", "Violação de regras"))
         target = data.get("target", "author")
         return {"mode": "mute", "mute_minutes": mins, "reason": reason, "target": target}
+
+    # ✅ regra: reply implícito sem infração nunca vira "no"
+    if mode == "no" and implicit_reply:
+        return {"mode": "reply", "reply": _clean_sentence(data.get("reply", "Entendi"))}
 
     if mode == "no":
         return {"mode": "no", "reply": "Não."}
