@@ -1,6 +1,6 @@
 import os, asyncio, re, traceback, time, unicodedata
 from datetime import timedelta
-from typing import List, Optional, Dict, Tuple
+from typing import List, Optional, Dict
 
 import discord
 from discord.ext import commands
@@ -20,9 +20,9 @@ OPENAI_TIMEOUT_SEC = float(os.getenv("OPENAI_TIMEOUT_SEC", "25"))
 ADMIN_NAMES = [x.strip().lower() for x in (os.getenv("ADMIN_NAMES", "")).split(",") if x.strip()]
 
 # thresholds
-EMOJI_FLOOD_SINGLE = int(os.getenv("EMOJI_FLOOD_SINGLE", "8"))     # 8+ emojis numa msg
-EMOJI_FLOOD_WINDOW = int(os.getenv("EMOJI_FLOOD_WINDOW", "15"))    # 15+ emojis somando últimas 5
-REPEAT_SPAM_COUNT = int(os.getenv("REPEAT_SPAM_COUNT", "3"))       # 3 repetições
+EMOJI_FLOOD_SINGLE = int(os.getenv("EMOJI_FLOOD_SINGLE", "7"))      # ✅ mínimo 7 na mesma mensagem
+EMOJI_FLOOD_WINDOW = int(os.getenv("EMOJI_FLOOD_WINDOW", "15"))     # soma das últimas 5 (fica)
+REPEAT_SPAM_COUNT = int(os.getenv("REPEAT_SPAM_COUNT", "3"))        # 3 repetições
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -92,6 +92,20 @@ async def apply_timeout(member: discord.Member, minutes: int, reason: str):
         return
     await member.edit(communication_disabled_until=until, reason=reason)
 
+def is_currently_muted(member: discord.Member) -> bool:
+    """
+    Discord timeout ativo:
+    communication_disabled_until > agora
+    """
+    until = getattr(member, "communication_disabled_until", None)
+    if not until:
+        return False
+    try:
+        now = discord.utils.utcnow()
+        return until > now
+    except Exception:
+        return False
+
 # ---------- canal estrito + estilo ----------
 RELAXED_CHANNEL_KEYWORDS = {"geral", "chat", "bate-papo", "batepapo", "conversa"}
 STRICT_CHANNEL_KEYWORDS = {
@@ -109,15 +123,14 @@ def is_strict_channel(name: str) -> bool:
 
 SLANG = {"eae", "q", "pq", "fds", "fdp", "mano", "véi", "vei", "ta", "tá", "blz", "kkk", "kkkk"}
 
-def has_custom_emoji(s: str) -> bool:
-    return bool(re.search(r"<a?:\w+:\d+>", s))
-
 def count_unicode_emojis(s: str) -> int:
-    # conta caracteres 'So' como proxy de emoji
     return sum(1 for ch in s if unicodedata.category(ch) == "So")
 
+def count_custom_emojis(s: str) -> int:
+    return len(re.findall(r"<a?:\w+:\d+>", s))
+
 def has_emoji(s: str) -> bool:
-    return has_custom_emoji(s) or (count_unicode_emojis(s) > 0)
+    return (count_unicode_emojis(s) + count_custom_emojis(s)) > 0
 
 def bad_caps(s: str) -> bool:
     letters = [c for c in s if c.isalpha()]
@@ -153,7 +166,6 @@ def compute_style_flags(text: str) -> Dict[str, bool]:
 def normalize_for_repeat(s: str) -> str:
     s = (s or "").strip().lower()
     s = re.sub(r"\s+", " ", s)
-    # remove menções e pontuação “leve” pra pegar repetição mesmo com variações
     s = re.sub(r"<@!?\d+>", "", s)
     s = re.sub(r"[^\wÀ-ÿ ]+", "", s)
     return s.strip()
@@ -166,7 +178,7 @@ def repeat_count(current: str, last_msgs: List[str]) -> int:
     return sum(1 for x in all_msgs if x == cur)
 
 def emoji_count_text(s: str) -> int:
-    return (count_unicode_emojis(s) + (len(re.findall(r"<a?:\w+:\d+>", s))))
+    return count_unicode_emojis(s) + count_custom_emojis(s)
 
 def emoji_window_count(current: str, last_msgs: List[str]) -> int:
     total = emoji_count_text(current)
@@ -180,12 +192,30 @@ def compute_spam_flags(current: str, last_msgs: List[str]) -> Dict[str, bool]:
     e_window = emoji_window_count(current, last_msgs)
     return {
         "repeat_spam": rep >= REPEAT_SPAM_COUNT,
-        "emoji_flood_single": e_single >= EMOJI_FLOOD_SINGLE,
+        "emoji_flood_single": e_single >= EMOJI_FLOOD_SINGLE,   # ✅ agora 7+
         "emoji_flood_window": e_window >= EMOJI_FLOOD_WINDOW,
         "repeat_count": rep,
         "emoji_single": e_single,
         "emoji_window": e_window,
     }
+
+async def try_delete_message(msg: Optional[discord.Message], channel: discord.TextChannel):
+    if not msg:
+        return
+    me = channel.guild.me
+    if not (me and me.guild_permissions.manage_messages):
+        _log("Sem permissão Manage Messages para deletar.")
+        return
+    try:
+        await msg.delete()
+        _log("Mensagem do infrator deletada.")
+    except discord.Forbidden:
+        _log("Forbidden ao deletar (permissão/hierarquia).")
+    except discord.NotFound:
+        _log("Mensagem já não existe (NotFound).")
+    except Exception:
+        _log("Erro desconhecido ao deletar mensagem:")
+        traceback.print_exc()
 
 # ---------- handler ----------
 async def _handle_message(message: discord.Message):
@@ -216,18 +246,19 @@ async def _handle_message(message: discord.Message):
             # reply context
             replied_user: Optional[discord.Member] = None
             replied_text: Optional[str] = None
+            replied_msg_obj: Optional[discord.Message] = None
+
             if message.reference and isinstance(message.reference.resolved, discord.Message):
-                replied_msg = message.reference.resolved
-                if isinstance(replied_msg.author, discord.Member):
-                    replied_user = replied_msg.author
-                replied_text = (replied_msg.content or "").strip()
+                replied_msg_obj = message.reference.resolved
+                if isinstance(replied_msg_obj.author, discord.Member):
+                    replied_user = replied_msg_obj.author
+                replied_text = (replied_msg_obj.content or "").strip()
 
             # author text
             author_text = strip_bot_mention(message.content or "")
             _log(f"Texto limpo: {author_text!r}")
 
-            # ✅ FIX: se só mencionou o bot sem texto, mas está respondendo alguém,
-            # trate como pedido de análise da mensagem respondida.
+            # se só menção e reply existe -> comando implícito
             if not author_text and replied_text:
                 author_text = "Analise a mensagem respondida."
                 _log("Texto vazio após menção; usando comando implícito de análise do reply.")
@@ -285,9 +316,23 @@ async def _handle_message(message: discord.Message):
             _log(f"Ação: {action}")
 
             if action["mode"] == "mute":
+                # define o alvo do mute
                 target = author
+                offender_msg = message  # se o infrator é o autor, apaga a mensagem atual
+
                 if action.get("target") == "replied_user" and replied_user:
                     target = replied_user
+                    offender_msg = replied_msg_obj  # ✅ apaga a mensagem do infrator (a respondida)
+
+                # ✅ sempre tenta deletar a mensagem do infrator
+                await try_delete_message(offender_msg, message.channel)
+
+                # ✅ se já está mutado, não aplica outro
+                if is_currently_muted(target):
+                    await message.channel.send("Este usuario(a) já está mutado(a).")
+                    _log("Alvo já estava mutado, não aplicou novo timeout.")
+                    _log(f"Concluído em {time.time()-t0:.2f}s (already-muted)")
+                    return
 
                 me = message.guild.me
                 if not (me and me.guild_permissions.moderate_members):
