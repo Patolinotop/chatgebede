@@ -63,7 +63,7 @@ def _clean_sentence(s: str) -> str:
     s = re.sub(r"([!?\.])\.+$", r"\1", s)
     if re.search(r"[.!?]$", s):
         return s
-    if re.search(r"[,;:]$", s):
+    if re.search(r"[,;:]+$", s):
         return re.sub(r"[,;:]+$", ".", s)
     return s + "."
 
@@ -72,49 +72,6 @@ def _strip_meta(reply: str) -> str:
     low = r.lower()
     if any(re.search(p, low) for p in META_BANNED_PATTERNS):
         return "Entendi."
-    return r
-
-def _strip_questions(reply: str) -> str:
-    # Remove perguntas (você pediu sem puxar assunto)
-    r = (reply or "").strip()
-    # se a IA tentar emendar pergunta, corta no primeiro '?'
-    if "?" in r:
-        r = r.split("?", 1)[0].strip()
-        if not r:
-            r = "Entendi."
-        # garante ponto
-        if not re.search(r"[.!?]$", r):
-            r += "."
-    return r
-
-def _enforce_brevity(reply: str) -> str:
-    """
-    Regra:
-    - padrão: 1 frase curta
-    - se tiver muito longo, corta para ~14 palavras
-    - nunca termina com ':' ';' ','
-    """
-    r = (reply or "").strip()
-    # remove quebras exageradas
-    r = re.sub(r"\s+", " ", r).strip()
-
-    # se tiver múltiplas frases, mantém no máximo 2
-    parts = re.split(r"(?<=[.!])\s+", r)
-    parts = [p.strip() for p in parts if p.strip()]
-    if len(parts) > 2:
-        r = " ".join(parts[:2])
-    else:
-        r = " ".join(parts)
-
-    words = r.split()
-    if len(words) > 14:
-        r = " ".join(words[:14]).strip()
-        if not re.search(r"[.!?]$", r):
-            r += "."
-
-    r = re.sub(r"[,;:]+$", ".", r)
-    if not re.search(r"[.!?]$", r):
-        r += "."
     return r
 
 def run_moderation(text: str) -> Dict[str, Any]:
@@ -153,6 +110,7 @@ def decide_action(
     bot_user_id: int,
 ) -> Dict[str, Any]:
 
+    # spam/flood -> mute direto
     if spam_flags.get("repeat_spam") or spam_flags.get("emoji_flood_single") or spam_flags.get("emoji_flood_window"):
         return {"mode": "mute", "mute_minutes": 15, "reason": "Spam ou flood.", "target": "author"}
 
@@ -163,6 +121,7 @@ def decide_action(
     mod = run_moderation(combined_norm if combined_norm else (message_text or ""))
     flagged = _flagged(mod)
 
+    # canal estrito: forma ruim ao marcar o bot => mute
     if strict_channel and any(bool(v) for v in style_flags.values()):
         return {"mode": "mute", "mute_minutes": 30, "reason": "Forma inadequada para este canal.", "target": "author"}
 
@@ -171,22 +130,23 @@ def decide_action(
 
     system = (
         "Você conversa e modera em Discord.\n"
+        "\n"
         "Estilo obrigatório:\n"
         "- Nunca use emojis.\n"
         "- Nunca diga que é robô ou humano.\n"
         "- Nunca peça desculpas.\n"
         "- Nunca faça sermão.\n"
-        "- Nunca puxe assunto.\n"
+        "- Nunca ofereça ajuda extra no final.\n"
         "- Nunca faça perguntas de volta.\n"
-        "- Não ofereça ajuda extra no final.\n"
-        "- Seja curto e direto.\n"
-        "- Regra de tamanho: 1 frase curta por padrão. No máximo 2 frases se necessário.\n"
-        "- Gramática correta; termine com '.', '!' ou '?'.\n"
+        "- Seja frio, direto e com gramática.\n"
+        "- Se for conversa casual (cumprimento, reação, comentário), responda curto.\n"
+        "- Se for uma pergunta que peça explicação/definição/detalhe, pode responder longo o quanto precisar.\n"
+        "- Sempre termine com '.', '!' ou '?'.\n"
         "\n"
         "PROIBIDO:\n"
         "- Frases meta como 'sem infração', 'mensagem respondida', 'denúncia', 'análise', 'relatório'.\n"
         f"- Mencionar o próprio bot (<@{bot_user_id}> ou <@!{bot_user_id}>).\n"
-        "- Vocativos com nomes (ex.: 'Editi,').\n"
+        "- Vocativos com nomes (ex.: 'Editi,', 'Fulano,').\n"
         "\n"
         "Decisão:\n"
         "- Se houver infração: mode='mute'.\n"
@@ -238,7 +198,7 @@ def decide_action(
                 {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
             ],
             temperature=0.25,
-            max_tokens=220,
+            max_tokens=520,  # ✅ aumenta pra permitir textão quando precisar
             timeout=OPENAI_REQ_TIMEOUT
         )
         raw = (resp.choices[0].message.content or "").strip()
@@ -271,6 +231,4 @@ def decide_action(
 
     reply = _clean_sentence(data.get("reply", "Entendi."))
     reply = _strip_meta(reply)
-    reply = _strip_questions(reply)      # ✅ sem puxar assunto
-    reply = _enforce_brevity(reply)      # ✅ curto por padrão
     return {"mode": "reply", "reply": reply}
