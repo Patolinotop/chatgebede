@@ -1,4 +1,4 @@
-import os, asyncio, re, traceback, time
+import os, asyncio, re, traceback, time, unicodedata
 from datetime import timedelta
 from typing import List, Optional, Dict
 
@@ -14,7 +14,6 @@ load_dotenv()
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 MIN_TYPING_EXTRA = float(os.getenv("MIN_TYPING_EXTRA", "1.5"))
 
-# Debug controlado
 DEBUG_ERRORS_IN_DISCORD = os.getenv("DEBUG_ERRORS_IN_DISCORD", "0") == "1"
 OPENAI_TIMEOUT_SEC = float(os.getenv("OPENAI_TIMEOUT_SEC", "25"))
 
@@ -85,6 +84,73 @@ async def try_timeout(member: discord.Member, minutes: int, reason: str):
     until = discord.utils.utcnow() + timedelta(minutes=minutes)
     await member.edit(timeout=until, reason=reason)
 
+# --------- Canal estrito + flags de estilo ---------
+
+RELAXED_CHANNEL_KEYWORDS = {"geral", "chat", "bate-papo", "batepapo", "conversa"}
+STRICT_CHANNEL_KEYWORDS = {
+    "militar", "graduad", "avisos", "anuncio", "anúncio", "regras", "midia", "mídia",
+    "comunicados", "documentos", "ordens", "instrucao", "instrução", "relatorios", "relatório"
+}
+
+def is_strict_channel(name: str) -> bool:
+    n = (name or "").strip().lower()
+    if any(k in n for k in STRICT_CHANNEL_KEYWORDS):
+        return True
+    if any(k == n or k in n for k in RELAXED_CHANNEL_KEYWORDS):
+        return False
+    # default: se não parecer “geral/chat”, trate como estrito
+    return True
+
+SLANG = {"eae", "q", "pq", "fds", "fdp", "mano", "véi", "vei", "ta", "tá", "blz", "bele", "kkk", "kkkk", "lol"}
+
+def has_emoji(s: str) -> bool:
+    # pega emoji unicode e também :custom_emoji:
+    if re.search(r"<a?:\w+:\d+>", s):
+        return True
+    for ch in s:
+        cat = unicodedata.category(ch)
+        # Emojis geralmente não são letras/números/pontuação e caem em "So"
+        if cat == "So":
+            return True
+    return False
+
+def bad_caps(s: str) -> bool:
+    letters = [c for c in s if c.isalpha()]
+    if len(letters) < 6:
+        return False
+    upp = sum(1 for c in letters if c.isupper())
+    low = sum(1 for c in letters if c.islower())
+    # gritaria
+    if upp >= 0.8 * (upp + low):
+        return True
+    return False
+
+def bad_punctuation(s: str) -> bool:
+    t = s.strip()
+    if len(t) < 4:
+        return True
+    # não termina com pontuação básica
+    if not re.search(r"[.!?]$", t):
+        return True
+    # excesso de repetição
+    if re.search(r"([!?\.])\1{3,}", t):
+        return True
+    return False
+
+def contains_slang(s: str) -> bool:
+    w = set(re.findall(r"[a-zA-ZÀ-ÿ]+", s.lower()))
+    return any(x in w for x in SLANG)
+
+def compute_style_flags(text: str) -> Dict[str, bool]:
+    return {
+        "emoji": has_emoji(text),
+        "slang": contains_slang(text),
+        "caps": bad_caps(text),
+        "punctuation": bad_punctuation(text),
+    }
+
+# --------- handler ---------
+
 async def _handle_message(message: discord.Message):
     if not isinstance(message.channel, discord.TextChannel):
         return
@@ -97,7 +163,10 @@ async def _handle_message(message: discord.Message):
         return
 
     async with lock:
-        _log(f"Trigger em #{message.channel.name} por {display_name(message.author)} ({message.author.id})")
+        ch_name = message.channel.name or ""
+        strict = is_strict_channel(ch_name)
+
+        _log(f"Trigger em #{ch_name} (strict={strict}) por {display_name(message.author)} ({message.author.id})")
         t0 = time.time()
 
         async with message.channel.typing():
@@ -114,6 +183,10 @@ async def _handle_message(message: discord.Message):
                 _log("Sem texto após remover mention. Encerrando.")
                 return
 
+            # estilo: só aplicamos a regra dura se strict=True
+            style_flags = compute_style_flags(author_text)
+            _log(f"Style flags: {style_flags}")
+
             replied_user: Optional[discord.Member] = None
             replied_text: Optional[str] = None
             if message.reference and isinstance(message.reference.resolved, discord.Message):
@@ -129,7 +202,6 @@ async def _handle_message(message: discord.Message):
 
             _log(f"Hist autor(5): {len(last5_author)} | outro(5): {len(last5_other)}")
 
-            # RAG pode demorar; não deixa travar infinito
             contexts, best_sim = await asyncio.wait_for(
                 asyncio.to_thread(search_context, author_text),
                 timeout=OPENAI_TIMEOUT_SEC
@@ -140,7 +212,6 @@ async def _handle_message(message: discord.Message):
             admin_author = is_admin_by_name(author) or author.guild_permissions.administrator
             _log(f"admin_author={admin_author}")
 
-            # decisão do modelo também pode demorar
             action = await asyncio.wait_for(
                 asyncio.to_thread(
                     decide_action,
@@ -155,6 +226,9 @@ async def _handle_message(message: discord.Message):
                     [],
                     contexts,
                     relevant,
+                    ch_name,
+                    strict,
+                    style_flags,
                 ),
                 timeout=OPENAI_TIMEOUT_SEC
             )
@@ -195,7 +269,6 @@ async def on_message(message: discord.Message):
     except asyncio.TimeoutError:
         _log("TIMEOUT em processamento (OpenAI/GitHub lento).")
         traceback.print_exc()
-        # Sem fallback “bonzinho”: mostra erro se debug estiver ligado
         if DEBUG_ERRORS_IN_DISCORD:
             try:
                 await message.reply("Erro: timeout.", mention_author=False)
@@ -205,7 +278,6 @@ async def on_message(message: discord.Message):
         _log("ERRO em on_message:")
         traceback.print_exc()
         if DEBUG_ERRORS_IN_DISCORD:
-            # manda o erro curto pra você ver no Discord
             try:
                 await message.reply("Erro interno. Veja logs.", mention_author=False)
             except Exception:
