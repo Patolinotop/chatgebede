@@ -84,8 +84,6 @@ async def try_timeout(member: discord.Member, minutes: int, reason: str):
     until = discord.utils.utcnow() + timedelta(minutes=minutes)
     await member.edit(timeout=until, reason=reason)
 
-# --------- Canal estrito + flags de estilo ---------
-
 RELAXED_CHANNEL_KEYWORDS = {"geral", "chat", "bate-papo", "batepapo", "conversa"}
 STRICT_CHANNEL_KEYWORDS = {
     "militar", "graduad", "avisos", "anuncio", "anúncio", "regras", "midia", "mídia",
@@ -98,19 +96,15 @@ def is_strict_channel(name: str) -> bool:
         return True
     if any(k == n or k in n for k in RELAXED_CHANNEL_KEYWORDS):
         return False
-    # default: se não parecer “geral/chat”, trate como estrito
     return True
 
-SLANG = {"eae", "q", "pq", "fds", "fdp", "mano", "véi", "vei", "ta", "tá", "blz", "bele", "kkk", "kkkk", "lol"}
+SLANG = {"eae", "q", "pq", "fds", "fdp", "mano", "véi", "vei", "ta", "tá", "blz", "kkk", "kkkk"}
 
 def has_emoji(s: str) -> bool:
-    # pega emoji unicode e também :custom_emoji:
     if re.search(r"<a?:\w+:\d+>", s):
         return True
     for ch in s:
-        cat = unicodedata.category(ch)
-        # Emojis geralmente não são letras/números/pontuação e caem em "So"
-        if cat == "So":
+        if unicodedata.category(ch) == "So":
             return True
     return False
 
@@ -120,19 +114,14 @@ def bad_caps(s: str) -> bool:
         return False
     upp = sum(1 for c in letters if c.isupper())
     low = sum(1 for c in letters if c.islower())
-    # gritaria
-    if upp >= 0.8 * (upp + low):
-        return True
-    return False
+    return (upp >= 0.8 * (upp + low))
 
 def bad_punctuation(s: str) -> bool:
     t = s.strip()
     if len(t) < 4:
         return True
-    # não termina com pontuação básica
     if not re.search(r"[.!?]$", t):
         return True
-    # excesso de repetição
     if re.search(r"([!?\.])\1{3,}", t):
         return True
     return False
@@ -148,8 +137,6 @@ def compute_style_flags(text: str) -> Dict[str, bool]:
         "caps": bad_caps(text),
         "punctuation": bad_punctuation(text),
     }
-
-# --------- handler ---------
 
 async def _handle_message(message: discord.Message):
     if not isinstance(message.channel, discord.TextChannel):
@@ -180,10 +167,9 @@ async def _handle_message(message: discord.Message):
             _log(f"Texto limpo: {author_text!r}")
 
             if not author_text:
-                _log("Sem texto após remover mention. Encerrando.")
+                _log("Sem texto após remover mention.")
                 return
 
-            # estilo: só aplicamos a regra dura se strict=True
             style_flags = compute_style_flags(author_text)
             _log(f"Style flags: {style_flags}")
 
@@ -202,6 +188,7 @@ async def _handle_message(message: discord.Message):
 
             _log(f"Hist autor(5): {len(last5_author)} | outro(5): {len(last5_other)}")
 
+            _log("Iniciando RAG...")
             contexts, best_sim = await asyncio.wait_for(
                 asyncio.to_thread(search_context, author_text),
                 timeout=OPENAI_TIMEOUT_SEC
@@ -212,6 +199,7 @@ async def _handle_message(message: discord.Message):
             admin_author = is_admin_by_name(author) or author.guild_permissions.administrator
             _log(f"admin_author={admin_author}")
 
+            _log("Iniciando decide_action (OpenAI)...")
             action = await asyncio.wait_for(
                 asyncio.to_thread(
                     decide_action,
@@ -232,7 +220,6 @@ async def _handle_message(message: discord.Message):
                 ),
                 timeout=OPENAI_TIMEOUT_SEC
             )
-
             _log(f"Ação: {action}")
 
             if action["mode"] == "mute":
@@ -241,16 +228,31 @@ async def _handle_message(message: discord.Message):
                     target = replied_user
 
                 me = message.guild.me
-                if me and me.guild_permissions.moderate_members:
-                    await try_timeout(target, int(action["mute_minutes"]), action["reason"])
-                    report = (
-                        f"Tempo do mute: {int(action['mute_minutes'])} minuto(s).\n"
-                        f"Usuário: <@{target.id}>.\n"
-                        f"Motivo: {action['reason']}\n"
-                    )
-                    await message.channel.send(report)
-                else:
+                if not (me and me.guild_permissions.moderate_members):
+                    _log("Sem permissão Moderate Members.")
                     await message.channel.send("Não.")
+                    return
+
+                try:
+                    await try_timeout(target, int(action["mute_minutes"]), action["reason"])
+                except discord.Forbidden:
+                    _log("Forbidden ao tentar mutar (hierarquia/permissão).")
+                    if DEBUG_ERRORS_IN_DISCORD:
+                        await message.channel.send("Erro: sem permissão para mutar.")
+                    return
+                except Exception:
+                    _log("Erro desconhecido ao mutar:")
+                    traceback.print_exc()
+                    if DEBUG_ERRORS_IN_DISCORD:
+                        await message.channel.send("Erro ao aplicar mute. Veja logs.")
+                    return
+
+                report = (
+                    f"Tempo do mute: {int(action['mute_minutes'])} minuto(s).\n"
+                    f"Usuário: <@{target.id}>.\n"
+                    f"Motivo: {action['reason']}\n"
+                )
+                await message.channel.send(report)
                 _log(f"Concluído em {time.time()-t0:.2f}s (mute)")
                 return
 
