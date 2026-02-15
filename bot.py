@@ -1,4 +1,4 @@
-import os, asyncio, re
+import os, asyncio, re, traceback, time
 from datetime import timedelta
 from typing import List, Optional, Dict
 
@@ -14,6 +14,10 @@ load_dotenv()
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 MIN_TYPING_EXTRA = float(os.getenv("MIN_TYPING_EXTRA", "1.5"))
 
+# Debug controlado
+DEBUG_ERRORS_IN_DISCORD = os.getenv("DEBUG_ERRORS_IN_DISCORD", "0") == "1"
+OPENAI_TIMEOUT_SEC = float(os.getenv("OPENAI_TIMEOUT_SEC", "25"))
+
 ADMIN_NAMES = [x.strip().lower() for x in (os.getenv("ADMIN_NAMES", "")).split(",") if x.strip()]
 
 intents = discord.Intents.default()
@@ -23,9 +27,10 @@ intents.messages = True
 intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
-
-# Regra: se já está respondendo no canal, ignora
 _channel_locks: Dict[int, asyncio.Lock] = {}
+
+def _log(msg: str):
+    print(f"[BOT] {msg}", flush=True)
 
 def get_lock(channel_id: int) -> asyncio.Lock:
     if channel_id not in _channel_locks:
@@ -64,7 +69,6 @@ def triggered(message: discord.Message) -> bool:
         return False
 
     mentioned = bot.user in message.mentions
-
     replied_to_bot = False
     if message.reference and isinstance(message.reference.resolved, discord.Message):
         replied_to_bot = (message.reference.resolved.author.id == bot.user.id)
@@ -81,77 +85,82 @@ async def try_timeout(member: discord.Member, minutes: int, reason: str):
     until = discord.utils.utcnow() + timedelta(minutes=minutes)
     await member.edit(timeout=until, reason=reason)
 
-@bot.event
-async def on_ready():
-    print(f"Logado como {bot.user}.")
-
-@bot.event
-async def on_message(message: discord.Message):
-    # só canal de texto em servidor
+async def _handle_message(message: discord.Message):
     if not isinstance(message.channel, discord.TextChannel):
         return
-
     if not triggered(message):
         return
 
     lock = get_lock(message.channel.id)
     if lock.locked():
-        # regra: se já está respondendo, ignora e nem faz request
+        _log(f"Ignorando: lock ativo no canal {message.channel.id}")
         return
 
     async with lock:
+        _log(f"Trigger em #{message.channel.name} por {display_name(message.author)} ({message.author.id})")
+        t0 = time.time()
+
         async with message.channel.typing():
-            # delay mínimo extra
             await asyncio.sleep(MIN_TYPING_EXTRA)
 
             author = message.author
             if not isinstance(author, discord.Member):
                 return
 
-            # texto “limpo” sem mention
             author_text = strip_bot_mention(message.content or "")
+            _log(f"Texto limpo: {author_text!r}")
+
             if not author_text:
+                _log("Sem texto após remover mention. Encerrando.")
                 return
 
-            # se for reply, pega alvo e texto
-            replied_msg: Optional[discord.Message] = None
             replied_user: Optional[discord.Member] = None
             replied_text: Optional[str] = None
-
             if message.reference and isinstance(message.reference.resolved, discord.Message):
                 replied_msg = message.reference.resolved
                 if isinstance(replied_msg.author, discord.Member):
                     replied_user = replied_msg.author
                 replied_text = (replied_msg.content or "").strip()
 
-            # últimas 5 do autor e do replied_user (se houver)
             last5_author = await last_n_messages_from(message.channel, author.id, 5)
             last5_other = []
             if replied_user:
                 last5_other = await last_n_messages_from(message.channel, replied_user.id, 5)
 
-            # RAG do GitHub
-            contexts, best_sim = search_context(author_text)
+            _log(f"Hist autor(5): {len(last5_author)} | outro(5): {len(last5_other)}")
+
+            # RAG pode demorar; não deixa travar infinito
+            contexts, best_sim = await asyncio.wait_for(
+                asyncio.to_thread(search_context, author_text),
+                timeout=OPENAI_TIMEOUT_SEC
+            )
             relevant = context_is_relevant(best_sim)
+            _log(f"RAG best_sim={best_sim:.3f} relevant={relevant} ctx={len(contexts)}")
 
-            # admin?
             admin_author = is_admin_by_name(author) or author.guild_permissions.administrator
+            _log(f"admin_author={admin_author}")
 
-            action = decide_action(
-                message_text=author_text,
-                author_display=display_name(author),
-                author_roles_top2=top2_roles(author),
-                replied_user_display=display_name(replied_user) if replied_user else None,
-                replied_text=replied_text,
-                last5_author=last5_author,
-                last5_other=last5_other,
-                is_admin_author=admin_author,
-                admin_targets=[],  # se você for usar lista do txt, dá pra plugar depois
-                contexts=contexts,
-                context_relevant=relevant,
+            # decisão do modelo também pode demorar
+            action = await asyncio.wait_for(
+                asyncio.to_thread(
+                    decide_action,
+                    author_text,
+                    display_name(author),
+                    top2_roles(author),
+                    display_name(replied_user) if replied_user else None,
+                    replied_text,
+                    last5_author,
+                    last5_other,
+                    admin_author,
+                    [],
+                    contexts,
+                    relevant,
+                ),
+                timeout=OPENAI_TIMEOUT_SEC
             )
 
-            # executar ação
+            _log(f"Ação: {action}")
+
             if action["mode"] == "mute":
                 target = author
                 if action.get("target") == "replied_user" and replied_user:
@@ -159,24 +168,51 @@ async def on_message(message: discord.Message):
 
                 me = message.guild.me
                 if me and me.guild_permissions.moderate_members:
-                    try:
-                        await try_timeout(target, int(action["mute_minutes"]), action["reason"])
-                        report = (
-                            f"Tempo do mute: {int(action['mute_minutes'])} minuto(s).\n"
-                            f"Usuário: <@{target.id}>.\n"
-                            f"Motivo: {action['reason']}\n"
-                        )
-                        await message.channel.send(report)
-                    except discord.Forbidden:
-                        await message.channel.send("Não.")
+                    await try_timeout(target, int(action["mute_minutes"]), action["reason"])
+                    report = (
+                        f"Tempo do mute: {int(action['mute_minutes'])} minuto(s).\n"
+                        f"Usuário: <@{target.id}>.\n"
+                        f"Motivo: {action['reason']}\n"
+                    )
+                    await message.channel.send(report)
                 else:
                     await message.channel.send("Não.")
+                _log(f"Concluído em {time.time()-t0:.2f}s (mute)")
                 return
 
             reply_text = action.get("reply", "Não.")
             await message.reply(reply_text, mention_author=False)
+            _log(f"Concluído em {time.time()-t0:.2f}s (reply)")
+
+@bot.event
+async def on_ready():
+    _log(f"Logado como {bot.user}.")
+
+@bot.event
+async def on_message(message: discord.Message):
+    try:
+        await _handle_message(message)
+    except asyncio.TimeoutError:
+        _log("TIMEOUT em processamento (OpenAI/GitHub lento).")
+        traceback.print_exc()
+        # Sem fallback “bonzinho”: mostra erro se debug estiver ligado
+        if DEBUG_ERRORS_IN_DISCORD:
+            try:
+                await message.reply("Erro: timeout.", mention_author=False)
+            except Exception:
+                pass
+    except Exception:
+        _log("ERRO em on_message:")
+        traceback.print_exc()
+        if DEBUG_ERRORS_IN_DISCORD:
+            # manda o erro curto pra você ver no Discord
+            try:
+                await message.reply("Erro interno. Veja logs.", mention_author=False)
+            except Exception:
+                pass
 
 async def start_discord_bot():
     if not DISCORD_TOKEN:
         raise RuntimeError("DISCORD_TOKEN ausente")
+    _log("Iniciando bot.start()")
     await bot.start(DISCORD_TOKEN)
