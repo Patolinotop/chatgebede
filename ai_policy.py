@@ -31,16 +31,30 @@ GENERIC_REPORTER_PATTERNS = [
     r"^(resolve|da uma olhada|dá uma olhada)\s*$",
 ]
 
-META_BANNED_PATTERNS = [
+# Meta “professor” que você NÃO quer
+META_HARD_BANNED = [
     r"mensagem respondida",
     r"não apresenta infração",
     r"sem infração",
     r"não há infração",
-    r"apenas cumprimentando",
-    r"analis(e|ei|ando) (a|o) mensagem",
+    r"não configura infração",
+    r"configura infração",
     r"denúncia",
-    r"report(e|ei|ando)",
+    r"relatório",
+    r"análise",
+    r"analis(e|ei|ando)",
+    r"no contexto",
+    r"geralmente",
+    r"indica",
+    r"é uma afirmação que",
+    r"usada para",
+    r"interlocutor",
+    r"empatia",
+    r"desvalorizar",
+    r"provocar",
 ]
+
+SHORT_ACKS = ["Entendi.", "Certo.", "Ok.", "Beleza.", "Anotado."]
 
 def normalize_text(s: str) -> str:
     t = re.sub(r"\s+", " ", (s or "")).strip().lower()
@@ -67,10 +81,13 @@ def _clean_sentence(s: str) -> str:
         return re.sub(r"[,;:]+$", ".", s)
     return s + "."
 
-def _strip_meta(reply: str) -> str:
-    r = (reply or "").strip()
-    low = r.lower()
-    if any(re.search(p, low) for p in META_BANNED_PATTERNS):
+def _has_meta(reply: str) -> bool:
+    low = (reply or "").lower()
+    return any(re.search(p, low) for p in META_HARD_BANNED)
+
+def _sanitize_reply(reply: str) -> str:
+    r = _clean_sentence(reply)
+    if not r or _has_meta(r):
         return "Entendi."
     return r
 
@@ -86,6 +103,20 @@ def _flagged(mod: Dict[str, Any]) -> bool:
         return bool(mod["results"][0]["flagged"])
     except Exception:
         return False
+
+def is_question_like(text: str) -> bool:
+    t = (text or "").strip().lower()
+    if not t:
+        return False
+    if "?" in t:
+        return True
+    starters = ("o que", "oq", "quem", "onde", "quando", "por que", "porque", "como", "qual", "quais")
+    if t.startswith(starters):
+        return True
+    # pedidos diretos
+    if re.search(r"\b(explique|define|defina|diga|fale|mostre|ensine|resuma)\b", t):
+        return True
+    return False
 
 def decide_action(
     message_text: str,
@@ -125,40 +156,49 @@ def decide_action(
     if strict_channel and any(bool(v) for v in style_flags.values()):
         return {"mode": "mute", "mute_minutes": 30, "reason": "Forma inadequada para este canal.", "target": "author"}
 
+    # Se moderação marcou como pesado: mute (a IA ainda escolhe duração, mas aqui simplifica)
+    if flagged:
+        # se foi reply em alguém, pune o replied_user
+        target = "replied_user" if (implicit_reply and replied_text) else "author"
+        return {"mode": "mute", "mute_minutes": 60, "reason": "Conteúdo inadequado.", "target": target}
+
     context_block = "\n\n---\n\n".join(contexts[:5]) if (context_relevant and contexts) else ""
     needs_reply = reporter_needs_reply(author_raw_text) if implicit_reply else True
 
+    # Define qual texto é o “assunto” da conversa
+    topic_text = replied_text.strip() if (implicit_reply and replied_text) else (message_text or "").strip()
+    questionish = is_question_like(topic_text)
+
+    # Se NÃO é pergunta e NÃO é pedido: resposta curtíssima e acabou (sem IA filosofar)
+    if not questionish:
+        # ainda permite responder alguém específico no caso de reply
+        if implicit_reply and replied_user_mention and not needs_reply:
+            return {"mode": "reply", "reply": f"{replied_user_mention} Entendi."}
+        return {"mode": "reply", "reply": "Entendi."}
+
     system = (
         "Você conversa e modera em Discord.\n"
-        "\n"
-        "Estilo obrigatório:\n"
+        "Estilo:\n"
         "- Nunca use emojis.\n"
         "- Nunca diga que é robô ou humano.\n"
         "- Nunca peça desculpas.\n"
         "- Nunca faça sermão.\n"
-        "- Nunca ofereça ajuda extra no final.\n"
         "- Nunca faça perguntas de volta.\n"
+        "- Nunca ofereça ajuda extra no final.\n"
         "- Seja frio, direto e com gramática.\n"
-        "- Se for conversa casual (cumprimento, reação, comentário), responda curto.\n"
-        "- Se for uma pergunta que peça explicação/definição/detalhe, pode responder longo o quanto precisar.\n"
+        "- Responda curto por padrão.\n"
+        "- Se for uma pergunta que exija explicação, responda detalhado.\n"
         "- Sempre termine com '.', '!' ou '?'.\n"
         "\n"
         "PROIBIDO:\n"
-        "- Frases meta como 'sem infração', 'mensagem respondida', 'denúncia', 'análise', 'relatório'.\n"
+        "- Texto meta (sem infração, contexto, indica, geralmente, análise, relatório).\n"
         f"- Mencionar o próprio bot (<@{bot_user_id}> ou <@!{bot_user_id}>).\n"
-        "- Vocativos com nomes (ex.: 'Editi,', 'Fulano,').\n"
+        "- Vocativos com nomes (ex.: 'Editi,').\n"
         "\n"
-        "Decisão:\n"
-        "- Se houver infração: mode='mute'.\n"
-        "- Se NÃO houver infração: mode='reply' e responda sobre o conteúdo, sem meta.\n"
-        "- Use 'Não.' apenas para pedidos indevidos (ilegal/perigoso/sexual explícito/ódio/assédio/burlar regras).\n"
-        "\n"
-        "Reply implícito:\n"
-        "- Se implicit_reply=true, trate como conversa sobre a mensagem respondida.\n"
-        "- Se a infração estiver na mensagem respondida, aplique mute no autor dela (target='replied_user').\n"
-        "- Se não houver infração:\n"
-        "  - Se reporter_needs_reply=false, responda apenas ao replied_user (sem mencionar o autor do reply).\n"
-        "  - Se reporter_needs_reply=true, pode responder ambos, usando apenas as menções fornecidas.\n"
+        "Reply:\n"
+        "- Se implicit_reply=true, responda sobre o replied_text.\n"
+        "- Se reporter_needs_reply=false, responda apenas ao replied_user usando replied_user_mention.\n"
+        "- Se reporter_needs_reply=true, pode responder ambos usando as menções fornecidas.\n"
         "\n"
         "Preferência:\n"
         "- Se a pergunta for 'Lula ou Bolsonaro', responda exatamente com a preferência configurada.\n"
@@ -168,26 +208,16 @@ def decide_action(
 
     payload = {
         "channel": {"name": channel_name, "strict": strict_channel},
-        "message_text": message_text,
-        "author_raw_text": author_raw_text,
         "implicit_reply": implicit_reply,
         "reporter_needs_reply": needs_reply,
         "author_mention": author_mention,
         "replied_user_mention": replied_user_mention,
+        "message_text": message_text,
         "replied_text": replied_text or "",
-        "last5_author": last5_author,
-        "last5_other": last5_other,
-        "context_relevant": context_relevant,
+        "topic_text": topic_text,
         "context": context_block,
-        "flagged_by_moderation": flagged,
         "preference": {"politic_choice": PREFERRED_POLITIC},
-        "output_format": {
-            "mode": "reply|no|mute",
-            "reply": "string",
-            "mute_minutes": "int",
-            "reason": "string",
-            "target": "author|replied_user"
-        }
+        "output_format": {"mode": "reply|no", "reply": "string"}
     }
 
     try:
@@ -198,37 +228,26 @@ def decide_action(
                 {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
             ],
             temperature=0.25,
-            max_tokens=520,  # ✅ aumenta pra permitir textão quando precisar
+            max_tokens=700,
             timeout=OPENAI_REQ_TIMEOUT
         )
         raw = (resp.choices[0].message.content or "").strip()
     except Exception:
-        if flagged:
-            return {"mode": "mute", "mute_minutes": 60, "reason": "Conteúdo inadequado.", "target": "author"}
         return {"mode": "reply", "reply": "Entendi."}
 
     try:
         data = json.loads(raw)
     except Exception:
-        if flagged:
-            return {"mode": "mute", "mute_minutes": 60, "reason": "Conteúdo inadequado.", "target": "author"}
         return {"mode": "reply", "reply": "Entendi."}
 
     mode = data.get("mode", "reply")
-
-    if mode == "mute":
-        mins = int(data.get("mute_minutes", 60))
-        mins = max(MIN_MUTE_MIN, min(MAX_MUTE_MIN, mins))
-        reason = _clean_sentence(data.get("reason", "Violação de regras"))
-        target = data.get("target", "author")
-        return {"mode": "mute", "mute_minutes": mins, "reason": reason, "target": target}
-
-    if mode == "no" and implicit_reply:
-        mode = "reply"
-
     if mode == "no":
         return {"mode": "no", "reply": "Não."}
 
-    reply = _clean_sentence(data.get("reply", "Entendi."))
-    reply = _strip_meta(reply)
+    reply = _sanitize_reply(data.get("reply", "Entendi."))
+    # Se o reply for denúncia genérica e você não quer marcar o autor:
+    if implicit_reply and replied_user_mention and not needs_reply:
+        # garante que começa marcando o replied_user (mas sem textão meta)
+        if not reply.startswith(replied_user_mention):
+            reply = f"{replied_user_mention} {reply}"
     return {"mode": "reply", "reply": reply}
