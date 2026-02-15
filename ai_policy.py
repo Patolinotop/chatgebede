@@ -13,7 +13,6 @@ OPENAI_REQ_TIMEOUT = float(os.getenv("OPENAI_REQ_TIMEOUT", "20"))
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# abreviações comuns de palavrão/mandar se ferrar
 ABBR_MAP = {
     r"\bfdp\b": "filho da puta",
     r"\bfds\b": "foda-se",
@@ -21,8 +20,6 @@ ABBR_MAP = {
     r"\bpqp\b": "puta que pariu",
     r"\bkrl\b": "caralho",
     r"\bcrl\b": "caralho",
-    r"\bporra\b": "porra",
-    r"\bmerda\b": "merda",
 }
 
 def normalize_text(s: str) -> str:
@@ -70,7 +67,17 @@ def decide_action(
     channel_name: str,
     strict_channel: bool,
     style_flags: Dict[str, bool],
+    spam_flags: Dict[str, Any],
 ) -> Dict[str, Any]:
+
+    # spam/flood -> mute direto
+    if spam_flags.get("repeat_spam") or spam_flags.get("emoji_flood_single") or spam_flags.get("emoji_flood_window"):
+        return {
+            "mode": "mute",
+            "mute_minutes": 15,
+            "reason": "Spam ou flood.",
+            "target": "author",
+        }
 
     norm_message = normalize_text(message_text or "")
     norm_replied = normalize_text(replied_text or "") if replied_text else ""
@@ -79,7 +86,7 @@ def decide_action(
     mod = run_moderation(combined_norm if combined_norm else (message_text or ""))
     flagged = _flagged(mod)
 
-    # Canal estrito: marcou o bot com forma ruim => mute direto
+    # canal estrito: forma ruim ao marcar o bot => mute
     if strict_channel and any(bool(v) for v in style_flags.values()):
         return {
             "mode": "mute",
@@ -103,12 +110,14 @@ def decide_action(
         "- Gramática correta; termine com '.', '!' ou '?'.\n"
         "\n"
         "Interpretação:\n"
-        "- Trate abreviações como 'fdp', 'fds', 'vsf', 'pqp', 'krl' como palavrões.\n"
+        "- Abreviações como 'fdp', 'fds', 'vsf', 'pqp', 'krl' contam como palavrões.\n"
+        "- Se o usuário mencionou o bot respondendo outra mensagem, avalie também a mensagem respondida.\n"
+        "- Se a infração estiver na mensagem respondida, aplique mute no autor da mensagem respondida (target='replied_user').\n"
         "\n"
         "Política:\n"
         "- REGRA PADRÃO: responda normalmente, inclusive cumprimentos.\n"
         "- Use 'Não.' somente para pedidos indevidos (ilegal/perigoso/sexual explícito/ódio/assédio/burlar regras).\n"
-        "- Se for caso de punição (palavrões graves, ódio, sexual, spam, calúnia sem evidência no contexto apresentado), use modo 'mute'.\n"
+        "- Se for caso de punição (palavrões graves, ódio, sexual, spam, calúnia sem evidência), use modo 'mute'.\n"
         "\n"
         "Preferência:\n"
         "- Se a pergunta for 'Lula ou Bolsonaro', responda exatamente com a preferência configurada.\n"
@@ -119,18 +128,15 @@ def decide_action(
     payload = {
         "channel": {"name": channel_name, "strict": strict_channel},
         "message_text": message_text,
-        "message_text_normalized": combined_norm,
-        "author_display": author_display,
-        "author_roles_top2": author_roles_top2,
-        "replied_user_display": replied_user_display or "",
         "replied_text": replied_text or "",
+        "author_display": author_display,
+        "replied_user_display": replied_user_display or "",
         "last5_author": last5_author,
         "last5_other": last5_other,
-        "is_admin_author": is_admin_author,
-        "admin_targets": admin_targets,
         "context_relevant": context_relevant,
         "context": context_block,
         "style_flags": style_flags,
+        "spam_flags": spam_flags,
         "flagged_by_moderation": flagged,
         "preference": {"politic_choice": PREFERRED_POLITIC},
         "output_format": {
