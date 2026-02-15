@@ -55,8 +55,8 @@ VII - Os instrutores dos exames da divisão têm total direito de terem comporta
 VIII - Em casos de infrações graves, por meio de qualquer militar, os militares de tal divisão têm liberdade para agir de forma rude.
 IX - Outros militares devem acrescentar a eles em suas frases o “Guerreiro de Elite/senhor Guerreiro de Elite”.
 X - Um Fantasma (Praça) pode aplicar punição em qualquer Praça do Exército, de [REC] a [CB]. 
-XI - Um Fantasma (Graduado) pode aplicar punição em qualquer Graduado do Exército, de [T-SGT] a [CDT]. E em Praças do BAC e CIGS.
-XII - Um Fantasma das Forças Especiais (Oficial) pode aplicar punição em qualquer Oficial (N/A) da mesma categoria. Podendo também aplicar punição em qualquer Graduado do BAC e CIGS. 
+XI - Um Fantasma (Graduado) pode aplicar punição em qualquer Graduado do Exército, de [T-SGT] a [CDT]. E em Praças do BAC.
+XII - Um Fantasma das Forças Especiais (Oficial) pode aplicar punição em qualquer Oficial (N/A) da mesma categoria. Podendo também aplicar punição em qualquer Graduado do BAC.
 XIII - Ressaltando que seu poder, em base, deve ser respeitado por todos, independente de sua patente. Em casos de insubordinação referente a um Fantasma, o infrator estará sujeito a qualquer punição por meio da gravidade da infração.
 XIV - Os pronomes (Senhor Fantasma ou senhor Fantasma das Forças Especiais) referente aos membros do BFE por meio de qualquer militar, deve ser obrigatório somente se a patente do Fantasma foi superior no Exército. Caso não seja, somente os pronomes "Fantasma ou Fantasma das Forças Especiais" devem ser utilizados:
 Reafirma-se o disposto pelo Art.4.º - VIII, alíneas a e b.
@@ -74,15 +74,13 @@ VII - Os instrutores dos exames da divisão têm total direito de terem comporta
 VIII - Em casos de infrações graves, por meio de qualquer militar, os militares de tal divisão têm liberdade para agir de forma rude.
 IX - Outros militares devem acrescentar a eles em suas frases "Comandos/senhor Comandos”.
 X - Um Comandos (Praça) pode aplicar punição em qualquer Praça do Exército, de [REC] a [CB]. 
-X - Um Comandos (Graduado) pode aplicar punição em qualquer Graduado do Exército, de [T-SGT] a [CDT]. E em Praças do BFE e CIGS.
-XI - Um Comandos (Oficial) pode aplicar punição em qualquer Oficial (N/A) da mesma categoria. Podendo também, aplicar punição em qualquer Graduado do BFE e CIGS.
-XII - O Alto Comando do BAC tem direito de aplicar punição em qualquer Oficial do BFE ou CIGS. 
+X - Um Comandos (Graduado) pode aplicar punição em qualquer Graduado do Exército, de [T-SGT] a [CDT]. E em Praças do BFE.
+XI - Um Comandos (Oficial) pode aplicar punição em qualquer Oficial (N/A) da mesma categoria. Podendo também, aplicar punição em qualquer Graduado do BFE.
+XII - O Alto Comando do BAC tem direito de aplicar punição em qualquer Oficial do BFE.
 XIII - Ressaltando que seu poder em base, deve ser respeitado por todos, independente de sua patente. Em casos de insubordinação referente a um Comandos, o infrator estará sujeito a qualquer punição por meio da gravidade da infração
 XIV - O pronome (Senhor Comandos) referente aos membros do BAC por meio de qualquer militar, deve ser obrigatório somente se a patente do Comandos for superior no Exército. Caso não seja, somente o pronome "Comandos" deve ser utilizado:
 Reafirma-se o disposto pelo Art.4.º - VIII, alíneas a e b.
 
-
-Art. 24.  O Centro de Instrução de Guerra na Selva (CIGS) tem-se como uma divisão de cunho operacional; aptos a cumprir missões de natureza militar nas áreas mais inóspitas da destinada a qualificar militares líderes de pequenas frações como Guerreiros de Selva, combatentes.
 
 
 I - Se houver de acontecer penalidade com algum membro da divisão, apenas o Alto Comando ou Oficiais Superiores e acima deles (no Exército) poderão agir sobre o caso. Caso isso não seja possível, o Alto Escalão do Exército poderá agir sobre.
@@ -92,10 +90,7 @@ IV - Os membros da divisão não precisam de permissão para assistir a recrutam
 V - Outros militares devem acrescentar a eles em suas frases "Guerreiro de Selva/Senhor Guerreiro de Selva”.
 VI - Um Guerreiro de Selva (Praça) pode aplicar punição em qualquer Praça do Exército, de [REC] a [CB]. 
 VII - Um Guerreiro de Selva (Graduado) pode aplicar punição em qualquer Graduado do Exército, de [T-SGT] a [CDT]. E em Praças do BFEsp e BAC.
-VIII - Um Guerreiro de Selva (Oficial) pode aplicar punição em qualquer Oficial (N/A) da mesma categoria. Podendo também, aplicar punição em qualquer Graduado do BFEsp e BAC.
-IX - O Alto Comando do CIGS tem direito de aplicar punição em qualquer Oficial do BFE ou BAC.
-X - Ressaltando que seu poder, em base, deve ser respeitado por todos, independente de sua patente. Em casos de insubordinação referente a um Guerreiro de Selva, o infrator estará sujeito a qualquer punição por meio da gravidade da infração.
-XI - Os pronomes (Senhor Guerreiro de Selva) referente aos membros do CIGS por meio de qualquer militar, deve ser obrigatório somente se a patente do Guerreiro de Selva for superior no Exército. Caso não seja, somente os pronomes "Guerreiro de Selva" devem ser utilizados:
-Reafirma-se o disposto pelo Art.4.º - VIII, alíneas a e b.
+
+
 
 
