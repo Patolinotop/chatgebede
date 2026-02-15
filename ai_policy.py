@@ -5,11 +5,9 @@ from openai import OpenAI
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
 MOD_MODEL = os.getenv("MOD_MODEL", "omni-moderation-latest")
 
-# limites de timeout do Discord: até 28 dias, mas recomendo capar
 MAX_MUTE_MIN = int(os.getenv("MAX_MUTE_MIN", "10080"))  # 7 dias
 MIN_MUTE_MIN = int(os.getenv("MIN_MUTE_MIN", "1"))
 
-# preferência configurada (exemplo)
 PREFERRED_POLITIC = os.getenv("PREFERRED_POLITIC", "Bolsonaro")
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -23,7 +21,6 @@ def _clean_sentence(s: str) -> str:
     return s
 
 def run_moderation(text: str) -> Dict[str, Any]:
-    # v1/moderations
     return client.moderations.create(model=MOD_MODEL, input=text).to_dict()
 
 def _flagged(mod: Dict[str, Any]) -> bool:
@@ -44,6 +41,11 @@ def decide_action(
     admin_targets: List[str],
     contexts: List[str],
     context_relevant: bool,
+
+    # novos campos
+    channel_name: str,
+    strict_channel: bool,
+    style_flags: Dict[str, bool],
 ) -> Dict[str, Any]:
     """
     return:
@@ -56,27 +58,25 @@ def decide_action(
       }
     """
 
-    # 1) moderação rápida do conteúdo atual + (se tiver) do replied_text
-    combined = message_text + ("\n" + replied_text if replied_text else "")
+    combined = (message_text or "") + ("\n" + replied_text if replied_text else "")
     mod = run_moderation(combined)
     flagged = _flagged(mod)
 
-    # 2) prompt para decisão, com saída JSON
-    # regras principais:
-    # - se conteúdo grave => mute
-    # - se pedido ilegal/perigoso/ódio/sexual => "Não." ou mute dependendo da gravidade/insistência
-    # - se admin mandou mutar alguém (linguagem natural) => obedecer
-    # - política: responder PREFERRED_POLITIC se perguntarem "Lula ou Bolsonaro" (exemplo)
-    # - sempre respeitoso, sem emoji, sem pedir desculpas, sem auto-identificar como bot
+    # SYSTEM: regras gerais + canal estrito
     system = (
-        "Você é um moderador e respondente de Discord, curto e direto.\n"
-        "Nunca use emojis. Nunca diga que é robô ou humano.\n"
-        "Nunca peça desculpas. Nunca faça sermão.\n"
-        "Se não puder/Não deve ajudar, responda apenas: 'Não.'\n"
-        "Se for caso de punição, retorne modo 'mute' e não retorne texto de resposta.\n"
-        "As respostas devem ter gramática correta e terminar com ponto.\n"
-        "Use o tratamento baseado no cargo mais adequado.\n"
+        "Você é moderador e respondente em Discord, curto e direto.\n"
+        "Nunca use emojis.\n"
+        "Nunca diga que é robô ou humano.\n"
+        "Nunca peça desculpas.\n"
+        "Nunca faça sermão.\n"
+        "Se não puder/não deve ajudar, responda apenas: 'Não.'\n"
+        "Se for caso de punição, retorne modo 'mute' e NÃO retorne texto.\n"
+        "Respostas devem ter gramática correta e terminar com ponto.\n"
         "Se a pergunta for 'Lula ou Bolsonaro', responda exatamente com a preferência configurada.\n"
+        "\n"
+        "REGRAS DE CANAL ESTRITO:\n"
+        "Se strict_channel=true e houver violação de forma (gíria, emoji, caixa errada, pontuação ruim), aplique mute.\n"
+        "Em canal estrito, qualquer menção ao bot com mensagem mal formatada deve resultar em mute.\n"
     )
 
     roles_hint = ""
@@ -85,7 +85,8 @@ def decide_action(
 
     context_block = "\n\n---\n\n".join(contexts[:5]) if (context_relevant and contexts) else ""
 
-    user = {
+    payload = {
+        "channel": {"name": channel_name, "strict": strict_channel},
         "message_text": message_text,
         "author_display": author_display,
         "roles_hint": roles_hint,
@@ -97,9 +98,9 @@ def decide_action(
         "admin_targets": admin_targets,
         "context_relevant": context_relevant,
         "context": context_block,
-        "preference": {
-            "politic_choice": PREFERRED_POLITIC
-        },
+        "style_flags": style_flags,
+        "preference": {"politic_choice": PREFERRED_POLITIC},
+        "flagged_by_moderation": flagged,
         "output_format": {
             "mode": "reply|no|mute",
             "reply": "string (only if mode is reply or no)",
@@ -109,28 +110,37 @@ def decide_action(
         }
     }
 
-    resp = client.responses.create(
-        model=OPENAI_MODEL,
-        input=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": json.dumps(user, ensure_ascii=False)},
-        ],
-        temperature=0.2,
-        max_output_tokens=250
-    )
+    # Usa CHAT completions (compatível)
+    try:
+        resp = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+            ],
+            temperature=0.2,
+            max_tokens=260,
+        )
+        raw = (resp.choices[0].message.content or "").strip()
+    except Exception:
+        # se a chamada falhar, a gente retorna erro “seco” ou mute se flagged
+        if flagged:
+            return {"mode": "mute", "mute_minutes": 60, "reason": "Conteúdo inadequado.", "target": "author"}
+        return {"mode": "no", "reply": "Não."}
 
-    raw = (resp.output_text or "").strip()
-
-    # fallback se o modelo não devolver JSON certinho
+    # Parse JSON
     try:
         data = json.loads(raw)
     except Exception:
-        # se foi moderado/flagged, prefere mute curto
+        # Se canal estrito e style_flags indica problema, muta
+        if strict_channel and any(style_flags.values()):
+            return {"mode": "mute", "mute_minutes": 30, "reason": "Forma inadequada para este canal.", "target": "author"}
         if flagged:
             return {"mode": "mute", "mute_minutes": 60, "reason": "Conteúdo inadequado.", "target": "author"}
         return {"mode": "no", "reply": "Não."}
 
     mode = data.get("mode", "no")
+
     if mode == "mute":
         mins = int(data.get("mute_minutes", 60))
         mins = max(MIN_MUTE_MIN, min(MAX_MUTE_MIN, mins))
