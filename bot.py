@@ -12,16 +12,14 @@ from rag import search_context, context_is_relevant
 from ai_policy import decide_action
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-
 if not DISCORD_TOKEN:
     raise RuntimeError("DISCORD_TOKEN ausente")
 
 # Configs
 HISTORY_LIMIT = 5
-MIN_TYPING_DELAY = 1.5  # regra: sempre espera +1.5s além do tempo de API
+MIN_TYPING_DELAY = 1.5
 DECIDE_TIMEOUT = float(os.getenv("DECIDE_TIMEOUT", "25"))
-BUSY_COOLDOWN = float(os.getenv("BUSY_COOLDOWN", "0.0"))  # opcional
+BUSY_COOLDOWN = float(os.getenv("BUSY_COOLDOWN", "0.0"))
 EMOJI_FLOOD_MIN = int(os.getenv("EMOJI_FLOOD_MIN", "7"))
 REPEAT_SPAM_MIN = int(os.getenv("REPEAT_SPAM_MIN", "3"))
 REPEAT_WINDOW_SEC = int(os.getenv("REPEAT_WINDOW_SEC", "30"))
@@ -45,8 +43,7 @@ bot = discord.Client(intents=intents)
 _busy_lock = asyncio.Lock()
 _last_done_ts = 0.0
 
-# cache simples para repetição por usuário/canal
-_repeat_cache: Dict[Tuple[int, int], List[Tuple[float, str]]] = {}  # (channel_id, author_id) -> [(ts, norm_text), ...]
+_repeat_cache: Dict[Tuple[int, int], List[Tuple[float, str]]] = {}
 
 # -----------------------------
 # Utilidades de texto / estilo
@@ -93,37 +90,26 @@ def count_emojis(text: str) -> int:
     return len(EMOJI_RE.findall(text))
 
 def has_slang(text: str) -> bool:
-    # Heurística leve (não é lista de respostas prontas)
     t = (text or "").lower()
-    slang = ["eae", "ae", "blz", "vlw", "tmj", "kkk", "kkkk", "lol", "mano", "mto", "pq", "td", "tb", "vc", "vcs"]
+    slang = ["eae", "ae", "blz", "vlw", "tmj", "kkk", "kkkk", "mano", "mto", "pq", "td", "tb", "vc", "vcs"]
     return any(s in t for s in slang)
 
 def style_flags(text: str) -> Dict[str, bool]:
     t = (text or "")
     emojis = count_emojis(t) > 0
     slang = has_slang(t)
-    caps = bool(re.search(r"\b[A-Z]{5,}\b", t))  # CAPS em palavra longa
-    punctuation = bool(re.search(r"[.!?]", t))   # tem alguma pontuação final possível
+    caps = bool(re.search(r"\b[A-Z]{5,}\b", t))
+    punctuation = bool(re.search(r"[.!?]", t))
     return {"emoji": emojis, "slang": slang, "caps": caps, "punctuation": punctuation}
 
 def is_strict_channel(channel_name: str) -> bool:
-    """
-    Regra: se NÃO for algo tipo chat/geral, vira strict.
-    Ex.: "CHAT-MILITAR", "avisos", "mídias", "chatgraduados" => strict.
-    """
     name = (channel_name or "").lower()
-
-    # liberados (não strict)
     allowed = ["geral", "chat", "chat-geral", "bate-papo", "conversa", "off-topic", "offtopic"]
     if any(a in name for a in allowed):
         return False
-
-    # se parecer importante, strict
     keywords = ["militar", "gradu", "avis", "regras", "anuncios", "anúncios", "midia", "mídia", "media", "comunic", "admin", "staff", "mod"]
     if any(k in name for k in keywords):
         return True
-
-    # padrão: se não parece chat, trata como strict
     return True
 
 def best_two_roles(member: discord.Member) -> List[str]:
@@ -158,13 +144,7 @@ async def fetch_last_messages(channel: discord.abc.Messageable, user_id: int, li
     return out
 
 def spam_flags(channel_id: int, author_id: int, message_text: str) -> Dict[str, Any]:
-    """
-    - repeat_spam: 3+ mensagens iguais em janela
-    - emoji_flood_single: >= 7 emojis numa msg
-    - emoji_flood_window: (opcional) manter simples aqui (não necessário)
-    """
     flags = {"repeat_spam": False, "emoji_flood_single": False, "emoji_flood_window": False}
-
     norm = normalize_for_spam(message_text)
     ts = time.time()
 
@@ -174,7 +154,6 @@ def spam_flags(channel_id: int, author_id: int, message_text: str) -> Dict[str, 
     key = (channel_id, author_id)
     arr = _repeat_cache.get(key, [])
     arr.append((ts, norm))
-    # limpa janela
     arr = [(t, s) for (t, s) in arr if ts - t <= REPEAT_WINDOW_SEC]
     _repeat_cache[key] = arr
 
@@ -192,7 +171,6 @@ async def member_is_muted(member: discord.Member) -> bool:
         until = getattr(member, "communication_disabled_until", None)
         if until is None:
             return False
-        # discord.py retorna datetime aware/naive; normaliza
         if until.tzinfo is None:
             until = until.replace(tzinfo=timezone.utc)
         return until > now_utc()
@@ -201,7 +179,6 @@ async def member_is_muted(member: discord.Member) -> bool:
 
 async def try_timeout(member: discord.Member, minutes: int, reason: str) -> None:
     until = now_utc() + timedelta(minutes=minutes)
-    # discord.py 2.4: Member.timeout(until, reason=...)
     await member.timeout(until, reason=reason)
 
 async def try_delete_message(msg: discord.Message) -> bool:
@@ -216,14 +193,10 @@ async def try_delete_message(msg: discord.Message) -> bool:
 # -----------------------------
 
 async def _resolve_reference(message: discord.Message) -> Optional[discord.Message]:
-    """
-    Tenta resolver a mensagem respondida (reply).
-    """
     if not message.reference:
         return None
     if isinstance(message.reference.resolved, discord.Message):
         return message.reference.resolved
-    # tenta fetch
     try:
         if message.reference.message_id:
             return await message.channel.fetch_message(message.reference.message_id)
@@ -237,18 +210,14 @@ def _should_trigger(message: discord.Message) -> bool:
     if not bot.user:
         return False
 
-    # mention direta
     if bot.user.mentioned_in(message):
         return True
 
-    # reply ao bot
     if message.reference and isinstance(message.reference.resolved, discord.Message):
         if message.reference.resolved.author and message.reference.resolved.author.id == bot.user.id:
             return True
 
-    # reply sem resolved ainda
     if message.reference and message.reference.message_id:
-        # vamos resolver no handler; aqui só deixa passar se tiver @bot também
         if bot.user.mentioned_in(message):
             return True
 
@@ -258,7 +227,6 @@ async def _handle_message(message: discord.Message) -> None:
     global _last_done_ts
 
     start = time.time()
-
     channel_name = getattr(message.channel, "name", "dm")
     strict = is_strict_channel(channel_name)
 
@@ -266,7 +234,6 @@ async def _handle_message(message: discord.Message) -> None:
     roles_top2 = best_two_roles(author_member) if author_member else []
     admin_author = is_admin_author(author_member)
 
-    # resolve reply
     replied_msg = await _resolve_reference(message)
     replied_user_mention = ""
     replied_user_display = None
@@ -279,9 +246,7 @@ async def _handle_message(message: discord.Message) -> None:
         replied_user_mention = replied_msg.author.mention
         replied_text = replied_msg.content or ""
 
-    # texto do autor (inclui mention/reply)
     raw_text = limpar_texto(message.content or "")
-    # remove só menção do bot, não remove menção de outros
     cleaned = remove_bot_mention(raw_text, bot.user.id) if bot.user else raw_text
     cleaned = limpar_texto(cleaned)
 
@@ -292,35 +257,32 @@ async def _handle_message(message: discord.Message) -> None:
         print("[BOT] Sem texto após remover mention.")
         return
 
-    # pega histórico
     last5_author = await fetch_last_messages(message.channel, message.author.id, HISTORY_LIMIT)
     last5_other = []
     if implicit_reply and replied_msg and replied_msg.author:
         last5_other = await fetch_last_messages(message.channel, replied_msg.author.id, HISTORY_LIMIT)
 
-    # spam flags
     sflags = spam_flags(message.channel.id, message.author.id, raw_text)
 
-    # style flags para canal strict (avaliar texto do autor + se reply, inclui o replied_text porque denúncia pode ser “EAE” mas reply era merda)
     combined_for_style = cleaned
     if implicit_reply and replied_text:
         combined_for_style = f"{cleaned}\n{replied_text}".strip()
     st_flags = style_flags(combined_for_style)
+
     print(f"[BOT] Style flags: {st_flags}")
     print(f"[BOT] Spam flags: {sflags}")
     print(f"[BOT] Hist autor(5): {len(last5_author)} | outro(5): {len(last5_other)}")
 
-    # RAG
     print("[BOT] Iniciando RAG...")
-    ctx = search_context(cleaned if cleaned else replied_text)
-    rel = context_is_relevant(ctx, cleaned if cleaned else replied_text)
+    query_for_rag = cleaned if cleaned else replied_text
+    ctx = search_context(query_for_rag)
+    rel = context_is_relevant(ctx, query_for_rag)
     best_sim = rel.get("best_sim", 0.0) if isinstance(rel, dict) else 0.0
     relevant = rel.get("relevant", False) if isinstance(rel, dict) else False
     ctx_chunks = ctx if isinstance(ctx, list) else []
     print(f"[BOT] RAG best_sim={best_sim:.3f} relevant={relevant} ctx={len(ctx_chunks)}")
     print(f"[BOT] admin_author={admin_author}")
 
-    # decide_action: roda em thread para não travar loop
     print("[BOT] Iniciando decide_action (OpenAI)...")
     action = await asyncio.wait_for(
         asyncio.to_thread(
@@ -333,7 +295,7 @@ async def _handle_message(message: discord.Message) -> None:
             last5_author=last5_author,
             last5_other=last5_other,
             is_admin_author=admin_author,
-            admin_targets=[],  # se você tiver lista extra, injeta aqui
+            admin_targets=[],
             contexts=ctx_chunks,
             context_relevant=relevant,
             channel_name=channel_name,
@@ -351,13 +313,10 @@ async def _handle_message(message: discord.Message) -> None:
 
     print(f"[BOT] Ação: {action}")
 
-    # typing delay: simula digitação + regra 1.5s
-    # mas se for mute e você quer "sem resposta", a gente só faz o moderar
     await asyncio.sleep(MIN_TYPING_DELAY)
 
     mode = (action or {}).get("mode", "reply")
 
-    # Se for mute
     if mode == "mute":
         target = (action or {}).get("target", "author")
         minutes = int((action or {}).get("mute_minutes", 30))
@@ -377,7 +336,6 @@ async def _handle_message(message: discord.Message) -> None:
             print("[BOT] Não foi possível resolver membro alvo para mute.")
             return
 
-        # já mutado?
         if await member_is_muted(target_member):
             try:
                 await message.reply("Este usuario(a) já está mutado(a).", mention_author=False)
@@ -386,7 +344,6 @@ async def _handle_message(message: discord.Message) -> None:
             print("[BOT] Alvo já estava mutado.")
             return
 
-        # tenta mutar
         try:
             await try_timeout(target_member, minutes, reason)
             print(f"[BOT] Mutado: {target_member} por {minutes} min. Motivo: {reason}")
@@ -395,12 +352,10 @@ async def _handle_message(message: discord.Message) -> None:
             traceback.print_exc()
             return
 
-        # tenta deletar mensagem do infrator (não do denunciante)
         if target_message_to_delete:
             deleted = await try_delete_message(target_message_to_delete)
             print(f"[BOT] Delete da msg do infrator: {deleted}")
 
-        # relatório curto, sem emoji
         try:
             report = f"{target_member.mention}\nTempo: {minutes} minuto(s).\nMotivo: {reason}"
             await message.channel.send(report)
@@ -411,7 +366,6 @@ async def _handle_message(message: discord.Message) -> None:
         print(f"[BOT] Concluído em {elapsed:.2f}s (mute)")
         return
 
-    # mode == "no"
     if mode == "no":
         reply = (action or {}).get("reply", "Não.")
         try:
@@ -425,17 +379,13 @@ async def _handle_message(message: discord.Message) -> None:
         print(f"[BOT] Concluído em {elapsed:.2f}s (no)")
         return
 
-    # mode == "reply"
     reply = (action or {}).get("reply", "").strip()
     if not reply:
-        # sem fallback enlatado: se vier vazio, não responde
         print("[BOT] Reply vazio, ignorando.")
         return
 
-    # nunca deixar o bot se auto-mencionar
     reply = re.sub(rf"<@!?{bot.user.id}>", "", reply).strip()
 
-    # manda
     try:
         async with message.channel.typing():
             await asyncio.sleep(0.2)
@@ -450,11 +400,9 @@ async def _handle_message(message: discord.Message) -> None:
 async def _guarded_handle(message: discord.Message) -> None:
     global _last_done_ts
 
-    # regra: se já está respondendo/digitando, ignora sem requisição
     if _busy_lock.locked():
         return
 
-    # cooldown opcional
     if BUSY_COOLDOWN > 0:
         if time.time() - _last_done_ts < BUSY_COOLDOWN:
             return
@@ -483,8 +431,33 @@ async def on_message(message: discord.Message):
         print("[BOT] ERRO em on_message:")
         traceback.print_exc()
 
-def start_discord_bot():
-    bot.run(DISCORD_TOKEN)
+# -----------------------------
+# Start: async para Uvicorn, sync local
+# -----------------------------
+
+_async_started = False
+
+async def start_discord_bot():
+    """
+    Para rodar dentro do Uvicorn/FastAPI (já existe event loop).
+    Não use bot.run aqui.
+    """
+    global _async_started
+    if _async_started:
+        return
+    _async_started = True
+    print("[BOT] start_discord_bot(): iniciando bot.start(...)")
+    await bot.start(DISCORD_TOKEN)
+
+async def stop_discord_bot():
+    """
+    Para shutdown limpo.
+    """
+    try:
+        await bot.close()
+    except Exception:
+        pass
 
 if __name__ == "__main__":
-    start_discord_bot()
+    # Local: aqui pode usar bot.run sem Uvicorn
+    bot.run(DISCORD_TOKEN)
