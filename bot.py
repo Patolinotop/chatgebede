@@ -15,10 +15,8 @@ DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 if not DISCORD_TOKEN:
     raise RuntimeError("DISCORD_TOKEN ausente")
 
-# Debug: liga logs de RX quando mencionarem o bot / reply
 DEBUG_RX = os.getenv("DEBUG_RX", "1").strip() == "1"
 
-# Configs
 HISTORY_LIMIT = 5
 MIN_TYPING_DELAY = 1.5
 DECIDE_TIMEOUT = float(os.getenv("DECIDE_TIMEOUT", "25"))
@@ -186,7 +184,6 @@ async def _resolve_reference(message: discord.Message) -> Optional[discord.Messa
 def _is_mention(message: discord.Message) -> bool:
     if not bot.user:
         return False
-    # mais confiável que mentioned_in em alguns cenários
     return any(u.id == bot.user.id for u in (message.mentions or []))
 
 def _should_trigger(message: discord.Message) -> bool:
@@ -279,7 +276,10 @@ async def _handle_message(message: discord.Message) -> None:
     print("[BOT] Iniciando RAG...")
     query_for_rag = cleaned if cleaned else replied_text
     ctx = search_context(query_for_rag)
-    rel = context_is_relevant(ctx, query_for_rag)
+
+    # ✅ CORREÇÃO AQUI: sua função aceita só 1 argumento
+    rel = context_is_relevant(ctx)
+
     best_sim = rel.get("best_sim", 0.0) if isinstance(rel, dict) else 0.0
     relevant = rel.get("relevant", False) if isinstance(rel, dict) else False
     ctx_chunks = ctx if isinstance(ctx, list) else []
@@ -419,7 +419,6 @@ async def on_ready():
 @bot.event
 async def on_message(message: discord.Message):
     try:
-        # DEBUG: prova que o evento chegou quando mencionam ou reply
         if DEBUG_RX and bot.user:
             mentioned = _is_mention(message)
             has_ref = bool(message.reference and message.reference.message_id)
@@ -430,6 +429,7 @@ async def on_message(message: discord.Message):
 
         if not _should_trigger(message):
             return
+
         await _guarded_handle(message)
     except Exception:
         print("[BOT] ERRO em on_message:")
