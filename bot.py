@@ -15,6 +15,9 @@ DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 if not DISCORD_TOKEN:
     raise RuntimeError("DISCORD_TOKEN ausente")
 
+# Debug: liga logs de RX quando mencionarem o bot / reply
+DEBUG_RX = os.getenv("DEBUG_RX", "1").strip() == "1"
+
 # Configs
 HISTORY_LIMIT = 5
 MIN_TYPING_DELAY = 1.5
@@ -24,7 +27,6 @@ EMOJI_FLOOD_MIN = int(os.getenv("EMOJI_FLOOD_MIN", "7"))
 REPEAT_SPAM_MIN = int(os.getenv("REPEAT_SPAM_MIN", "3"))
 REPEAT_WINDOW_SEC = int(os.getenv("REPEAT_WINDOW_SEC", "30"))
 
-# Admin override (opcional): IDs separados por vírgula
 ADMIN_IDS = set()
 _admin_ids_raw = (os.getenv("ADMIN_IDS") or "").strip()
 if _admin_ids_raw:
@@ -42,22 +44,13 @@ bot = discord.Client(intents=intents)
 
 _busy_lock = asyncio.Lock()
 _last_done_ts = 0.0
-
 _repeat_cache: Dict[Tuple[int, int], List[Tuple[float, str]]] = {}
-
-# -----------------------------
-# Utilidades de texto / estilo
-# -----------------------------
 
 MENTION_RE = re.compile(r"<@!?\d+>")
 URL_RE = re.compile(r"https?://\S+")
 SPACE_RE = re.compile(r"\s+")
 EMOJI_RE = re.compile(
-    r"("                           # captura emoji unicode em geral
-    r"[\U0001F300-\U0001FAFF]"     # pictographs
-    r"|[\u2600-\u26FF]"            # misc symbols
-    r"|[\u2700-\u27BF]"            # dingbats
-    r")",
+    r"(" r"[\U0001F300-\U0001FAFF]" r"|[\u2600-\u26FF]" r"|[\u2700-\u27BF]" r")",
     flags=re.UNICODE
 )
 
@@ -65,29 +58,23 @@ def now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
 def limpar_texto(t: str) -> str:
-    t = (t or "")
-    t = t.replace("\u200b", "")
-    t = SPACE_RE.sub(" ", t).strip()
-    return t
+    t = (t or "").replace("\u200b", "")
+    return SPACE_RE.sub(" ", t).strip()
 
 def remove_bot_mention(text: str, bot_id: int) -> str:
     if not text:
         return ""
     text = re.sub(rf"<@!?{bot_id}>", "", text).strip()
-    text = SPACE_RE.sub(" ", text).strip()
-    return text
+    return SPACE_RE.sub(" ", text).strip()
 
 def normalize_for_spam(text: str) -> str:
     t = (text or "").lower().strip()
     t = URL_RE.sub("", t)
     t = MENTION_RE.sub("", t)
-    t = SPACE_RE.sub(" ", t).strip()
-    return t
+    return SPACE_RE.sub(" ", t).strip()
 
 def count_emojis(text: str) -> int:
-    if not text:
-        return 0
-    return len(EMOJI_RE.findall(text))
+    return len(EMOJI_RE.findall(text or ""))
 
 def has_slang(text: str) -> bool:
     t = (text or "").lower()
@@ -162,10 +149,6 @@ def spam_flags(channel_id: int, author_id: int, message_text: str) -> Dict[str, 
 
     return flags
 
-# -----------------------------
-# Timeout/Mute e delete
-# -----------------------------
-
 async def member_is_muted(member: discord.Member) -> bool:
     try:
         until = getattr(member, "communication_disabled_until", None)
@@ -188,10 +171,6 @@ async def try_delete_message(msg: discord.Message) -> bool:
     except Exception:
         return False
 
-# -----------------------------
-# Core handler
-# -----------------------------
-
 async def _resolve_reference(message: discord.Message) -> Optional[discord.Message]:
     if not message.reference:
         return None
@@ -204,13 +183,19 @@ async def _resolve_reference(message: discord.Message) -> Optional[discord.Messa
         return None
     return None
 
+def _is_mention(message: discord.Message) -> bool:
+    if not bot.user:
+        return False
+    # mais confiável que mentioned_in em alguns cenários
+    return any(u.id == bot.user.id for u in (message.mentions or []))
+
 def _should_trigger(message: discord.Message) -> bool:
     if message.author.bot:
         return False
     if not bot.user:
         return False
 
-    if bot.user.mentioned_in(message):
+    if _is_mention(message):
         return True
 
     if message.reference and isinstance(message.reference.resolved, discord.Message):
@@ -218,14 +203,31 @@ def _should_trigger(message: discord.Message) -> bool:
             return True
 
     if message.reference and message.reference.message_id:
-        if bot.user.mentioned_in(message):
+        if _is_mention(message):
             return True
 
     return False
 
-async def _handle_message(message: discord.Message) -> None:
-    global _last_done_ts
+def _log_channel_perms(message: discord.Message) -> None:
+    try:
+        if not message.guild or not bot.user:
+            return
+        me = message.guild.me or message.guild.get_member(bot.user.id)
+        if not me:
+            return
+        perms = message.channel.permissions_for(me)
+        print(
+            "[BOT] Perms no canal:"
+            f" view_channel={perms.view_channel}"
+            f" read_message_history={perms.read_message_history}"
+            f" send_messages={perms.send_messages}"
+            f" moderate_members={perms.moderate_members}"
+            f" manage_messages={perms.manage_messages}"
+        )
+    except Exception:
+        pass
 
+async def _handle_message(message: discord.Message) -> None:
     start = time.time()
     channel_name = getattr(message.channel, "name", "dm")
     strict = is_strict_channel(channel_name)
@@ -252,6 +254,7 @@ async def _handle_message(message: discord.Message) -> None:
 
     print(f"[BOT] Trigger em #{channel_name} (strict={strict}) por {message.author} ({message.author.id})")
     print(f"[BOT] Texto limpo: {repr(cleaned)}")
+    _log_channel_perms(message)
 
     if not cleaned and not implicit_reply:
         print("[BOT] Sem texto após remover mention.")
@@ -362,8 +365,7 @@ async def _handle_message(message: discord.Message) -> None:
         except Exception:
             pass
 
-        elapsed = time.time() - start
-        print(f"[BOT] Concluído em {elapsed:.2f}s (mute)")
+        print(f"[BOT] Concluído em {time.time() - start:.2f}s (mute)")
         return
 
     if mode == "no":
@@ -375,8 +377,7 @@ async def _handle_message(message: discord.Message) -> None:
         except Exception:
             print("[BOT] Erro ao responder (no):")
             traceback.print_exc()
-        elapsed = time.time() - start
-        print(f"[BOT] Concluído em {elapsed:.2f}s (no)")
+        print(f"[BOT] Concluído em {time.time() - start:.2f}s (no)")
         return
 
     reply = (action or {}).get("reply", "").strip()
@@ -394,8 +395,7 @@ async def _handle_message(message: discord.Message) -> None:
         print("[BOT] Erro ao responder (reply):")
         traceback.print_exc()
 
-    elapsed = time.time() - start
-    print(f"[BOT] Concluído em {elapsed:.2f}s (reply)")
+    print(f"[BOT] Concluído em {time.time() - start:.2f}s (reply)")
 
 async def _guarded_handle(message: discord.Message) -> None:
     global _last_done_ts
@@ -403,19 +403,14 @@ async def _guarded_handle(message: discord.Message) -> None:
     if _busy_lock.locked():
         return
 
-    if BUSY_COOLDOWN > 0:
-        if time.time() - _last_done_ts < BUSY_COOLDOWN:
-            return
+    if BUSY_COOLDOWN > 0 and (time.time() - _last_done_ts < BUSY_COOLDOWN):
+        return
 
     async with _busy_lock:
         try:
             await _handle_message(message)
         finally:
             _last_done_ts = time.time()
-
-# -----------------------------
-# Eventos
-# -----------------------------
 
 @bot.event
 async def on_ready():
@@ -424,6 +419,15 @@ async def on_ready():
 @bot.event
 async def on_message(message: discord.Message):
     try:
+        # DEBUG: prova que o evento chegou quando mencionam ou reply
+        if DEBUG_RX and bot.user:
+            mentioned = _is_mention(message)
+            has_ref = bool(message.reference and message.reference.message_id)
+            if mentioned or has_ref:
+                ch = getattr(message.channel, "name", "dm")
+                print(f"[BOT] RX msg em #{ch} de {message.author} ({message.author.id}) mentioned={mentioned} ref={has_ref} content_len={len(message.content or '')}")
+                _log_channel_perms(message)
+
         if not _should_trigger(message):
             return
         await _guarded_handle(message)
@@ -431,17 +435,9 @@ async def on_message(message: discord.Message):
         print("[BOT] ERRO em on_message:")
         traceback.print_exc()
 
-# -----------------------------
-# Start: async para Uvicorn, sync local
-# -----------------------------
-
 _async_started = False
 
 async def start_discord_bot():
-    """
-    Para rodar dentro do Uvicorn/FastAPI (já existe event loop).
-    Não use bot.run aqui.
-    """
     global _async_started
     if _async_started:
         return
@@ -450,14 +446,10 @@ async def start_discord_bot():
     await bot.start(DISCORD_TOKEN)
 
 async def stop_discord_bot():
-    """
-    Para shutdown limpo.
-    """
     try:
         await bot.close()
     except Exception:
         pass
 
 if __name__ == "__main__":
-    # Local: aqui pode usar bot.run sem Uvicorn
     bot.run(DISCORD_TOKEN)
